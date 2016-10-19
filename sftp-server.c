@@ -136,15 +136,10 @@ typedef struct {
 
 struct sshbuf {
 	u_char *d;		/* Data */
-	const u_char *cd;	/* Const data */
 	size_t off;		/* First available byte is buf->d + buf->off */
 	size_t size;		/* Last byte is buf->d + buf->size - 1 */
 	size_t max_size;	/* Maximum size of buffer */
 	size_t alloc;		/* Total bytes allocated to buf->d */
-	int readonly;		/* Refers to external, const data */
-	int dont_free;		/* Kludge to support sshbuf_init */
-	u_int refcount;		/* Tracks self and number of child buffers */
-	struct sshbuf *parent;	/* If child, pointer to parent */
 };
 
 /* Our verbosity */
@@ -648,10 +643,7 @@ static int
 sshbuf_check_sanity(const struct sshbuf *buf)
 {
 	if (buf == NULL ||
-	    (!buf->readonly && buf->d != buf->cd) ||
-	    buf->refcount < 1 || buf->refcount > SSHBUF_REFS_MAX ||
-	    buf->cd == NULL ||
-	    (buf->dont_free && (buf->readonly || buf->parent != NULL)) ||
+	    buf->d == NULL ||
 	    buf->max_size > SSHBUF_SIZE_MAX ||
 	    buf->alloc > buf->max_size ||
 	    buf->size > buf->alloc ||
@@ -670,15 +662,11 @@ static struct sshbuf *
 sshbuf_new(void)
 {
 	struct sshbuf *ret;
-
 	if ((ret = calloc(sizeof(*ret), 1)) == NULL)
 		return NULL;
 	ret->alloc = SSHBUF_SIZE_INIT;
 	ret->max_size = SSHBUF_SIZE_MAX;
-	ret->readonly = 0;
-	ret->refcount = 1;
-	ret->parent = NULL;
-	if ((ret->cd = ret->d = calloc(1, ret->alloc)) == NULL) {
+	if ((ret->d = calloc(1, ret->alloc)) == NULL) {
 		free(ret);
 		return NULL;
 	}
@@ -688,8 +676,6 @@ sshbuf_new(void)
 static void
 sshbuf_free(struct sshbuf *buf)
 {
-	int dont_free = 0;
-
 	if (buf == NULL)
 		return;
 	/*
@@ -701,27 +687,12 @@ sshbuf_free(struct sshbuf *buf)
 	if (sshbuf_check_sanity(buf) != 0)
 		return;
 	/*
-	 * If we are a child, the free our parent to decrement its reference
-	 * count and possibly free it.
-	 */
-	sshbuf_free(buf->parent);
-	buf->parent = NULL;
-	/*
 	 * If we are a parent with still-extant children, then don't free just
 	 * yet. The last child's call to sshbuf_free should decrement our
 	 * refcount to 0 and trigger the actual free.
 	 */
-	buf->refcount--;
-	if (buf->refcount > 0)
-		return;
-	dont_free = buf->dont_free;
-	if (!buf->readonly) {
-		explicit_bzero(buf->d, buf->alloc);
-		free(buf->d);
-	}
 	explicit_bzero(buf, sizeof(*buf));
-	if (!dont_free)
-		free(buf);
+	free(buf);
 }
 
 static size_t
@@ -737,7 +708,7 @@ sshbuf_ptr(const struct sshbuf *buf)
 {
 	if (sshbuf_check_sanity(buf) != 0)
 		return NULL;
-	return buf->cd + buf->off;
+	return buf->d + buf->off;
 }
 
 static int
@@ -747,8 +718,6 @@ sshbuf_check_reserve(const struct sshbuf *buf, size_t len)
 
 	if ((r = sshbuf_check_sanity(buf)) != 0)
 		return r;
-	if (buf->readonly || buf->refcount > 1)
-		return SSH_ERR_BUFFER_READ_ONLY;
 	/* Check that len is reasonable and that max_size + available < len */
 	if (len > buf->max_size || buf->max_size - len < buf->size - buf->off)
 		return SSH_ERR_NO_BUFFER_SPACE;
@@ -758,7 +727,7 @@ sshbuf_check_reserve(const struct sshbuf *buf, size_t len)
 static void
 sshbuf_maybe_pack(struct sshbuf *buf, int force)
 {
-	if (buf->off == 0 || buf->readonly || buf->refcount > 1)
+	if (buf->off == 0)
 		return;
 	if (force ||
 	    (buf->off >= SSHBUF_PACK_MIN && buf->off >= buf->size / 2)) {
@@ -800,7 +769,7 @@ sshbuf_reserve(struct sshbuf *buf, size_t len, u_char **dpp)
 			return SSH_ERR_ALLOC_FAIL;
 		}
 		buf->alloc = rlen;
-		buf->cd = buf->d = dp;
+		buf->d = dp;
 		if ((r = sshbuf_check_reserve(buf, len)) < 0) {
 			/* shouldn't fail */
 			if (dpp != NULL)
@@ -1123,18 +1092,12 @@ static void
 sshbuf_reset(struct sshbuf *buf)
 {
 	u_char *d;
-
-	if (buf->readonly || buf->refcount > 1) {
-		/* Nonsensical. Just make buffer appear empty */
-		buf->off = buf->size;
-		return;
-	}
 	if (sshbuf_check_sanity(buf) == 0)
 		explicit_bzero(buf->d, buf->alloc);
 	buf->off = buf->size = 0;
 	if (buf->alloc != SSHBUF_SIZE_INIT) {
 		if ((d = realloc(buf->d, SSHBUF_SIZE_INIT)) != NULL) {
-			buf->cd = buf->d = d;
+			buf->d = d;
 			buf->alloc = SSHBUF_SIZE_INIT;
 		}
 	}
