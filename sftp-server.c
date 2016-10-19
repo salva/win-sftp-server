@@ -248,7 +248,6 @@ static void do_log(LogLevel level, const char *fmt, va_list args);
 #define HOWMANY(x, y) (((x)+((y)-1))/(y))
 #define ROUNDUP(x, y) (HOWMANY(x, y) * (y))
 
-
 #define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
 #define SIZE_MAX ((unsigned long)-1)
 
@@ -287,9 +286,11 @@ xstrdup(const char *str)
 	size_t len;
 	char *cp;
 
+	if (str == NULL)
+		fatal("xstrdup: NULL pointer");
 	len = strlen(str) + 1;
 	cp = xmalloc(len);
-	strlcpy(cp, str, len);
+	memcpy(cp, str, len);
 	return cp;
 }
 
