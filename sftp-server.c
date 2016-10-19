@@ -243,10 +243,11 @@ static void cleanup_exit(int) __attribute__((noreturn));
 
 static void do_log(LogLevel level, const char *fmt, va_list args);
 
-#define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
-#define MAXIMUM(a, b)	(((a) > (b)) ? (a) : (b))
-#define ROUNDUP(x, y)   ((((x)+((y)-1))/(y))*(y))
-#define howmany(x,y)	(((x)+((y)-1))/(y))
+#define MINIMUM(a, b) (((a) < (b)) ? (a) : (b))
+#define MAXIMUM(a, b) (((a) > (b)) ? (a) : (b))
+#define HOWMANY(x, y) (((x)+((y)-1))/(y))
+#define ROUNDUP(x, y) (HOWMANY(x, y) * (y))
+
 
 #define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
 #define SIZE_MAX ((unsigned long)-1)
@@ -2943,8 +2944,8 @@ sftp_server_main(int argc, char **argv, struct passwd *user_pw)
 	if ((oqueue = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
 
-	rset = xcalloc(howmany(max + 1, NFDBITS), sizeof(fd_mask));
-	wset = xcalloc(howmany(max + 1, NFDBITS), sizeof(fd_mask));
+	rset = xcalloc(HOWMANY(max + 1, NFDBITS), sizeof(fd_mask));
+	wset = xcalloc(HOWMANY(max + 1, NFDBITS), sizeof(fd_mask));
 
 	if (homedir != NULL) {
 		if (chdir(homedir) != 0) {
@@ -2953,7 +2954,7 @@ sftp_server_main(int argc, char **argv, struct passwd *user_pw)
 		}
 	}
 
-	set_size = howmany(max + 1, NFDBITS) * sizeof(fd_mask);
+	set_size = HOWMANY(max + 1, NFDBITS) * sizeof(fd_mask);
 	for (;;) {
 		memset(rset, 0, set_size);
 		memset(wset, 0, set_size);
