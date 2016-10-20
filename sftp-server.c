@@ -1468,7 +1468,7 @@ typedef struct Handle Handle;
 struct Handle {
 	int use;
 	DIR *dirp;
-	int fd;
+	HANDLE fd;
 	int flags;
 	char *name;
 	uint64_t bytes_read, bytes_write;
@@ -1480,6 +1480,99 @@ enum {
 	HANDLE_DIR,
 	HANDLE_FILE
 };
+
+#define SEC_TO_POSIX_EPOCH 11644473600LL
+#define WINDOWS_TICKS_PER_SECOND 10000000
+static FILETIME
+time_posix2win(uint64_t posix_time)
+{
+	FILETIME ft;
+	uint64_t win_time = ((posix_time + SEC_TO_POSIX_EPOCH) * WINDOWS_TICKS_PER_SECOND);
+	ft.dwLowDateTime = win_time & 0xffffffff;
+	ft.dwHighDateTime = win_time >> 32;
+	return ft;
+}
+
+static int
+w_utimes(char *name, uint32_t mtime, uint32_t atime)
+{
+
+	FILETIME wmtime = time_posix2win(mtime);
+	FILETIME watime = time_posix2win(atime);
+
+	int rc = 0;
+	HANDLE h = CreateFile(name, FILE_WRITE_ATTRIBUTES, 0,
+			      NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+	if (h == INVALID_HANDLE_VALUE)
+		rc = -1;
+	else {
+		if (!SetFileTime(h, &wmtime, &watime, &wmtime))
+			rc = -1;
+		if (!CloseHandle(h))
+			rc = -1;
+	}
+	return rc;
+}
+
+typedef unsigned int uid_t;
+typedef unsigned int gid_t;
+
+static int
+w_chown(char *name, uid_t uid, gid_t gid)
+{
+	// TODO: implement me!
+	error("w_chown(%s, %d, %d) <- unimplemented", name, uid, gid);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_lstat(char *name, struct stat *st) {
+	// TODO: implement me!
+	error("w_lstat(%s, ...) <- unimplemented", name);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_link(char *oldpath, char *newpath) {
+	// TODO: implement me!
+	error("w_link(%s, %s) <- unimplemented", oldpath, newpath);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_symlink(char *oldpath, char *newpath) {
+	// TODO: implement me!
+	error("w_symlink(%s, %s) <- unimplemented", oldpath, newpath);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_readlink(char *path, char *buf, size_t size) {
+	// TODO: implement me!
+	error("w_symlink(%s, ...) <- unimplemented", path);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_fsync(int fd) {
+	// TODO: implement me!
+	error("w_fsync(%d, ...) <- unimplemented", fd);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_close(HANDLE h) {
+	if (!CloseHandle(h))
+		return -1;
+	return;
+}
 
 Handle *handles = NULL;
 uint num_handles = 0;
@@ -1493,7 +1586,7 @@ static void handle_unused(int i)
 }
 
 static int
-handle_new(int use, const char *name, int fd, int flags, DIR *dirp)
+handle_new(int use, const char *name, HANDLE fd, int flags, DIR *dirp)
 {
 	int i;
 
@@ -1566,12 +1659,12 @@ handle_to_dir(int handle)
 	return NULL;
 }
 
-static int
+static HANDLE
 handle_to_fd(int handle)
 {
 	if (handle_is_ok(handle, HANDLE_FILE))
 		return handles[handle].fd;
-	return -1;
+	return INVALID_HANDLE_VALUE;
 }
 
 static int
@@ -1618,7 +1711,7 @@ handle_close(int handle)
 	int ret = -1;
 
 	if (handle_is_ok(handle, HANDLE_FILE)) {
-		ret = close(handles[handle].fd);
+		ret = w_close(handles[handle].fd);
 		free(handles[handle].name);
 		handle_unused(handle);
 	} else if (handle_is_ok(handle, HANDLE_DIR)) {
@@ -1943,7 +2036,10 @@ process_open(uint32_t id)
 	uint32_t pflags;
 	Attrib a;
 	char *name;
-	int r, handle, fd, flags, mode, status = SSH2_FX_FAILURE;
+	int r, handle, status = SSH2_FX_FAILURE;
+	HANDLE fd;
+	DWORD access = 0;
+	DWORD creation = 0;
 
 	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0 ||
 	    (r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
@@ -1952,6 +2048,30 @@ process_open(uint32_t id)
 
 	debug3("request %u: open flags %d", id, pflags);
 	flags = flags_from_portable(pflags);
+
+	if (pflags & SSH2_FXF_READ)
+		access |= GENERIC_READ;
+	if (pflags & SSH2_FXF_WRITE)
+		access |= GENERIC_WRITE;
+
+	if (pflags & SSH2_FXF_CREAT) {
+		if (pflags & SSH2_FXF_EXCL)
+			creation = CREATE_NEW;
+		else {
+			if ((pflags & SSH2_FXF_TRUNC) && (pflags & SSH2_FXF_WRITE))
+				creation = CREATE_ALWAYS;
+			else
+				creation = OPEN_ALWAYS;
+		}
+
+		WORKING HERE!!!!
+		
+	}
+	else if ((pflags & SSH2_FXF_TRUNC) && (pflags & SSH2_FXF_WRITE))
+		creation = TRUNCATE_EXISTING;
+	else
+		creation = OPEN_EXISTING;
+
 	mode = (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) ? a.perm : 0666;
 	logit("open \"%s\" flags %s mode 0%o",
 	    name, string_from_portable(pflags), mode);
@@ -1962,7 +2082,8 @@ process_open(uint32_t id)
 		status = SSH2_FX_PERMISSION_DENIED;
 	} else {
 		fd = open(name, flags, mode);
-		if (fd < 0) {
+		fd = CreateFile(name, mode, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTES_NORMAL, NULL)
+		if (fd == INVALID_HANDLE_VALUE) {
 			status = last_error_to_portable();
 		} else {
 			handle = handle_new(HANDLE_FILE, name, fd, flags, NULL);
@@ -1999,7 +2120,8 @@ process_read(uint32_t id)
 {
 	uint8_t buf[64*1024];
 	uint32_t len;
-	int r, handle, fd, ret, status = SSH2_FX_FAILURE;
+	int r, handle, ret, status = SSH2_FX_FAILURE;
+	HANDLE fd;
 	uint64_t off;
 
 	if ((r = get_handle(iqueue, &handle)) != 0 ||
@@ -2014,7 +2136,7 @@ process_read(uint32_t id)
 		debug2("read change len %d", len);
 	}
 	fd = handle_to_fd(handle);
-	if (fd >= 0) {
+	if (fd != INVALID_HANDLE_VALUE) {
 		if (lseek(fd, off, SEEK_SET) < 0) {
 			error("process_read: seek failed");
 			status = last_error_to_portable();
@@ -2144,92 +2266,6 @@ process_fstat(uint32_t id)
 	}
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
-}
-
-#define SEC_TO_POSIX_EPOCH 11644473600LL
-#define WINDOWS_TICKS_PER_SECOND 10000000
-static FILETIME
-time_posix2win(uint64_t posix_time)
-{
-	FILETIME ft;
-	uint64_t win_time = ((posix_time + SEC_TO_POSIX_EPOCH) * WINDOWS_TICKS_PER_SECOND);
-	ft.dwLowDateTime = win_time & 0xffffffff;
-	ft.dwHighDateTime = win_time >> 32;
-	return ft;
-}
-
-static int
-w_utimes(char *name, uint32_t mtime, uint32_t atime)
-{
-
-	FILETIME wmtime = time_posix2win(mtime);
-	FILETIME watime = time_posix2win(atime);
-
-	int rc = 0;
-	HANDLE h = CreateFile(name, FILE_WRITE_ATTRIBUTES, 0,
-			      NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-
-	if (h == INVALID_HANDLE_VALUE)
-		rc = -1;
-	else {
-		if (!SetFileTime(h, &wmtime, &watime, &wmtime))
-			rc = -1;
-		if (!CloseHandle(h))
-			rc = -1;
-	}
-	return rc;
-}
-
-typedef unsigned int uid_t;
-typedef unsigned int gid_t;
-
-static int
-w_chown(char *name, uid_t uid, gid_t gid)
-{
-	// TODO: implement me!
-	error("w_chown(%s, %d, %d) <- unimplemented", name, uid, gid);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_lstat(char *name, struct stat *st) {
-	// TODO: implement me!
-	error("w_lstat(%s, ...) <- unimplemented", name);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_link(char *oldpath, char *newpath) {
-	// TODO: implement me!
-	error("w_link(%s, %s) <- unimplemented", oldpath, newpath);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_symlink(char *oldpath, char *newpath) {
-	// TODO: implement me!
-	error("w_symlink(%s, %s) <- unimplemented", oldpath, newpath);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_readlink(char *path, char *buf, size_t size) {
-	// TODO: implement me!
-	error("w_symlink(%s, ...) <- unimplemented", path);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_fsync(int fd) {
-	// TODO: implement me!
-	error("w_fsync(%d, ...) <- unimplemented", fd);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
 }
 
 static void
