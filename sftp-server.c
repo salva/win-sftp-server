@@ -256,6 +256,222 @@ static void do_log(LogLevel level, const char *fmt, va_list args);
 
 //#define SIZE_MAX ((unsigned long)-1)
 
+static size_t
+strlcat(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+	size_t dlen;
+
+	/* Find the end of dst and adjust bytes left but don't go past end */
+	while (n-- != 0 && *d != '\0')
+		d++;
+	dlen = d - dst;
+	n = siz - dlen;
+
+	if (n == 0)
+		return(dlen + strlen(s));
+	while (*s != '\0') {
+		if (n != 1) {
+			*d++ = *s;
+			n--;
+		}
+		s++;
+	}
+	*d = '\0';
+
+	return(dlen + (s - src));	/* count does not include NUL */
+}
+
+static size_t
+strlcpy(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+
+	/* Copy as many bytes as will fit */
+	if (n != 0) {
+		while (--n != 0) {
+			if ((*d++ = *s++) == '\0')
+				break;
+		}
+	}
+
+	/* Not enough room in dst, add NUL and traverse rest of src */
+	if (n == 0) {
+		if (siz != 0)
+			*d = '\0';		/* NUL-terminate dst */
+		while (*s++)
+			;
+	}
+
+	return(s - src - 1);	/* count does not include NUL */
+}
+
+#define S_ISUID 2048
+#define S_ISGID 1024
+#define S_ISVTX 512
+#define S_IRGRP 32
+#define S_IWGRP 16
+#define S_IXGRP 8
+#define S_IROTH 4
+#define S_IWOTH 2
+#define S_IXOTH 1
+
+void
+strmode(int mode, char *p)
+{
+	 /* print type */
+	switch (mode & S_IFMT) {
+	case S_IFDIR:			/* directory */
+		*p++ = 'd';
+		break;
+	case S_IFCHR:			/* character special */
+		*p++ = 'c';
+		break;
+	case S_IFBLK:			/* block special */
+		*p++ = 'b';
+		break;
+	case S_IFREG:			/* regular */
+		*p++ = '-';
+		break;
+	/* case S_IFLNK:			/\* symbolic link *\/ */
+	/* 	*p++ = 'l'; */
+	/* 	break; */
+#ifdef S_IFSOCK
+	case S_IFSOCK:			/* socket */
+		*p++ = 's';
+		break;
+#endif
+#ifdef S_IFIFO
+	case S_IFIFO:			/* fifo */
+		*p++ = 'p';
+		break;
+#endif
+	default:			/* unknown */
+		*p++ = '?';
+		break;
+	}
+	/* usr */
+	if (mode & S_IRUSR)
+		*p++ = 'r';
+	else
+		*p++ = '-';
+	if (mode & S_IWUSR)
+		*p++ = 'w';
+	else
+		*p++ = '-';
+	switch (mode & (S_IXUSR | S_ISUID)) {
+	case 0:
+		*p++ = '-';
+		break;
+	case S_IXUSR:
+		*p++ = 'x';
+		break;
+	case S_ISUID:
+		*p++ = 'S';
+		break;
+	case S_IXUSR | S_ISUID:
+		*p++ = 's';
+		break;
+	}
+	/* group */
+	if (mode & S_IRGRP)
+		*p++ = 'r';
+	else
+		*p++ = '-';
+	if (mode & S_IWGRP)
+		*p++ = 'w';
+	else
+		*p++ = '-';
+	switch (mode & (S_IXGRP | S_ISGID)) {
+	case 0:
+		*p++ = '-';
+		break;
+	case S_IXGRP:
+		*p++ = 'x';
+		break;
+	case S_ISGID:
+		*p++ = 'S';
+		break;
+	case S_IXGRP | S_ISGID:
+		*p++ = 's';
+		break;
+	}
+	/* other */
+	if (mode & S_IROTH)
+		*p++ = 'r';
+	else
+		*p++ = '-';
+	if (mode & S_IWOTH)
+		*p++ = 'w';
+	else
+		*p++ = '-';
+	switch (mode & (S_IXOTH | S_ISVTX)) {
+	case 0:
+		*p++ = '-';
+		break;
+	case S_IXOTH:
+		*p++ = 'x';
+		break;
+	case S_ISVTX:
+		*p++ = 'T';
+		break;
+	case S_IXOTH | S_ISVTX:
+		*p++ = 't';
+		break;
+	}
+	*p++ = ' ';		/* will be a '+' if ACL's implemented */
+	*p = '\0';
+}
+
+static int
+vasprintf(char **str, const char *fmt, va_list ap)
+{
+	const int INIT_SZ = 128;
+	int ret = -1;
+	va_list ap2;
+	char *string, *newstr;
+	size_t len;
+
+	va_copy(ap2, ap);
+	if ((string = malloc(INIT_SZ)) == NULL)
+		goto fail;
+
+	ret = vsnprintf(string, INIT_SZ, fmt, ap2);
+	if (ret >= 0 && ret < INIT_SZ) { /* succeeded with initial alloc */
+		*str = string;
+	} else if (ret == INT_MAX || ret < 0) { /* Bad length */
+		free(string);
+		goto fail;
+	} else {	/* bigger than initial, realloc allowing for nul */
+		len = (size_t)ret + 1;
+		if ((newstr = realloc(string, len)) == NULL) {
+			free(string);
+			goto fail;
+		} else {
+			va_end(ap2);
+			va_copy(ap2, ap);
+			ret = vsnprintf(newstr, len, fmt, ap2);
+			if (ret >= 0 && (size_t)ret < len) {
+				*str = newstr;
+			} else { /* failed with realloc'ed string, give up */
+				free(newstr);
+				goto fail;
+			}
+		}
+	}
+	va_end(ap2);
+	return (ret);
+
+fail:
+	*str = NULL;
+	va_end(ap2);
+	fatal("vasprintf: out of memory");
+}
+
 static void *
 xmalloc(size_t size)
 {
@@ -693,7 +909,7 @@ sshbuf_free(struct sshbuf *buf)
 	 * yet. The last child's call to sshbuf_free should decrement our
 	 * refcount to 0 and trigger the actual free.
 	 */
-	explicit_bzero(buf, sizeof(*buf));
+	memset(buf, 0, sizeof(*buf));
 	free(buf);
 }
 
@@ -1095,7 +1311,7 @@ sshbuf_reset(struct sshbuf *buf)
 {
 	uint8_t *d;
 	if (sshbuf_check_sanity(buf) == 0)
-		explicit_bzero(buf->d, buf->alloc);
+		memset(buf->d, 0, buf->alloc);
 	buf->off = buf->size = 0;
 	if (buf->alloc != SSHBUF_SIZE_INIT) {
 		if ((d = realloc(buf->d, SSHBUF_SIZE_INIT)) != NULL) {
@@ -1875,7 +2091,11 @@ process_do_stat(uint32_t id, int do_lstat)
 
 	debug3("request %u: %sstat", id, do_lstat ? "l" : "");
 	verbose("%sstat name \"%s\"", do_lstat ? "l" : "", name);
-	r = do_lstat ? lstat(name, &st) : stat(name, &st);
+
+	// TODO: add lstat back
+	// r = do_lstat ? lstat(name, &st) : stat(name, &st);
+	r = stat(name, &st);
+
 	if (r < 0) {
 		status = last_error_to_portable();
 	} else {
@@ -1926,16 +2146,90 @@ process_fstat(uint32_t id)
 		send_status(id, status);
 }
 
-static struct timeval *
-attrib_to_tv(const Attrib *a)
+#define SEC_TO_POSIX_EPOCH 11644473600LL
+#define WINDOWS_TICKS_PER_SECOND 10000000
+static FILETIME
+time_posix2win(uint64_t posix_time)
 {
-	static struct timeval tv[2];
+	FILETIME ft;
+	uint64_t win_time = ((posix_time + SEC_TO_POSIX_EPOCH) * WINDOWS_TICKS_PER_SECOND);
+	ft.dwLowDateTime = win_time & 0xffffffff;
+	ft.dwHighDateTime = win_time >> 32;
+	return ft;
+}
 
-	tv[0].tv_sec = a->atime;
-	tv[0].tv_usec = 0;
-	tv[1].tv_sec = a->mtime;
-	tv[1].tv_usec = 0;
-	return tv;
+static int
+w_utimes(char *name, uint32_t mtime, uint32_t atime)
+{
+
+	FILETIME wmtime = time_posix2win(mtime);
+	FILETIME watime = time_posix2win(atime);
+
+	int rc = 0;
+	HANDLE h = CreateFile(name, FILE_WRITE_ATTRIBUTES, 0,
+			      NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+	if (h == INVALID_HANDLE_VALUE)
+		rc = -1;
+	else {
+		if (!SetFileTime(h, &wmtime, &watime, &wmtime))
+			rc = -1;
+		if (!CloseHandle(h))
+			rc = -1;
+	}
+	return rc;
+}
+
+typedef unsigned int uid_t;
+typedef unsigned int gid_t;
+
+static int
+w_chown(char *name, uid_t uid, gid_t gid)
+{
+	// TODO: implement me!
+	error("w_chown(%s, %d, %d) <- unimplemented", name, uid, gid);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_lstat(char *name, struct stat *st) {
+	// TODO: implement me!
+	error("w_lstat(%s, ...) <- unimplemented", name);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_link(char *oldpath, char *newpath) {
+	// TODO: implement me!
+	error("w_link(%s, %s) <- unimplemented", oldpath, newpath);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_symlink(char *oldpath, char *newpath) {
+	// TODO: implement me!
+	error("w_symlink(%s, %s) <- unimplemented", oldpath, newpath);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_readlink(char *path, char *buf, size_t size) {
+	// TODO: implement me!
+	error("w_symlink(%s, ...) <- unimplemented", path);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
+}
+
+static int
+w_fsync(int fd) {
+	// TODO: implement me!
+	error("w_fsync(%d, ...) <- unimplemented", fd);
+	SetLastError(ERROR_NOT_SUPPORTED);
+	return -1;
 }
 
 static void
@@ -1970,14 +2264,14 @@ process_setstat(uint32_t id)
 		strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
 		    localtime(&t));
 		logit("set \"%s\" modtime %s", name, buf);
-		r = utimes(name, attrib_to_tv(&a));
+		r = w_utimes(name, a.mtime, a.atime);
 		if (r == -1)
 			status = last_error_to_portable();
 	}
 	if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
 		logit("set \"%s\" owner %lu group %lu", name,
 		    (u_long)a.uid, (u_long)a.gid);
-		r = chown(name, a.uid, a.gid);
+		r = w_chown(name, a.uid, a.gid);
 		if (r == -1)
 			status = last_error_to_portable();
 	}
@@ -2027,22 +2321,20 @@ process_fsetstat(uint32_t id)
 			strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
 			    localtime(&t));
 			logit("set \"%s\" modtime %s", name, buf);
-#ifdef HAVE_FUTIMES
-			r = futimes(fd, attrib_to_tv(&a));
-#else
-			r = utimes(name, attrib_to_tv(&a));
-#endif
+
+			// TODO: implement and use futimes
+			// r = futimes(fd, attrib_to_tv(&a));
+			r = w_utimes(name, a.mtime, a.atime);
 			if (r == -1)
 				status = last_error_to_portable();
 		}
 		if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
 			logit("set \"%s\" owner %lu group %lu", name,
 			    (u_long)a.uid, (u_long)a.gid);
-#ifdef HAVE_FCHOWN
-			r = fchown(fd, a.uid, a.gid);
-#else
-			r = chown(name, a.uid, a.gid);
-#endif
+
+			// TODO: reimplement fchown
+			// r = fchown(fd, a.uid, a.gid);
+			r = w_chown(name, a.uid, a.gid);
 			if (r == -1)
 				status = last_error_to_portable();
 		}
@@ -2224,9 +2516,6 @@ fmt_scaled(long long number, char *result)
 /* 	return (cp->name); */
 /* } */
 
-typedef unsigned int uid_t;
-typedef unsigned int gid_t;
-
 static char *
 user_from_uid(uid_t uid, int nouser) {
 	return "paco";
@@ -2317,7 +2606,7 @@ process_readdir(uint32_t id)
 /* XXX OVERFLOW ? */
 			snprintf(pathname, sizeof pathname, "%s%s%s", path,
 			    strcmp(path, "/") ? "/" : "", dp->d_name);
-			if (lstat(pathname, &st) < 0)
+			if (w_lstat(pathname, &st) < 0)
 				continue;
 			stat_to_attrib(&st, &(stats[count].attrib));
 			stats[count].name = xstrdup(dp->d_name);
@@ -2446,11 +2735,11 @@ process_rename(uint32_t id)
 	debug3("request %u: rename", id);
 	logit("rename old \"%s\" new \"%s\"", oldpath, newpath);
 	status = SSH2_FX_FAILURE;
-	if (lstat(oldpath, &sb) == -1)
+	if (w_lstat(oldpath, &sb) == -1)
 		status = last_error_to_portable();
 	else if (S_ISREG(sb.st_mode)) {
 		/* Race-free rename of regular files */
-		if (link(oldpath, newpath) == -1) {
+		if (w_link(oldpath, newpath) == -1) {
 /* 			if (errno == EOPNOTSUPP || errno == ENOSYS */
 /* #ifdef EXDEV */
 /* 			    || errno == EXDEV */
@@ -2505,7 +2794,7 @@ process_readlink(uint32_t id)
 
 	debug3("request %u: readlink", id);
 	verbose("readlink \"%s\"", path);
-	if ((len = readlink(path, buf, sizeof(buf) - 1)) == -1)
+	if ((len = w_readlink(path, buf, sizeof(buf) - 1)) == -1)
 		send_status(id, last_error_to_portable());
 	else {
 		Stat s;
@@ -2531,7 +2820,7 @@ process_symlink(uint32_t id)
 	debug3("request %u: symlink", id);
 	logit("symlink old \"%s\" new \"%s\"", oldpath, newpath);
 	/* this will fail if 'newpath' exists */
-	r = symlink(oldpath, newpath);
+	r = w_symlink(oldpath, newpath);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
 	free(oldpath);
@@ -2569,7 +2858,7 @@ process_extended_hardlink(uint32_t id)
 
 	debug3("request %u: hardlink", id);
 	logit("hardlink old \"%s\" new \"%s\"", oldpath, newpath);
-	r = link(oldpath, newpath);
+	r = w_link(oldpath, newpath);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
 	free(oldpath);
@@ -2588,7 +2877,7 @@ process_extended_fsync(uint32_t id)
 	if ((fd = handle_to_fd(handle)) < 0)
 		status = SSH2_FX_NO_SUCH_FILE;
 	else if (handle_is_ok(handle, HANDLE_FILE)) {
-		r = fsync(fd);
+		r = w_fsync(fd);
 		status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	}
 	send_status(id, status);
@@ -2671,12 +2960,16 @@ process(void)
 			fatal("%s: buffer error: %d", __func__, r);
 		for (i = 0; handlers[i].handler != NULL; i++) {
 			if (type == handlers[i].type) {
-				if (!request_permitted(&handlers[i])) {
-					send_status(id,
-					    SSH2_FX_PERMISSION_DENIED);
-				} else {
-					handlers[i].handler(id);
-				}
+				// TODO: reintroduce request_permitted
+				/* if (!request_permitted(&handlers[i])) { */
+				/* 	send_status(id, */
+				/* 	    SSH2_FX_PERMISSION_DENIED); */
+				/* } else { */
+				/* 	handlers[i].handler(id); */
+				/* } */
+				/* break; */
+
+				handlers[i].handler(id);
 				break;
 			}
 		}
@@ -2712,14 +3005,15 @@ cleanup_exit(int i)
 static void
 sftp_server_usage(void)
 {
-	extern char *__progname;
+	char progname[200];
+	GetModuleFileName(0, progname, sizeof(progname));
 
 	fprintf(stderr,
-	    "usage: %s [-ehR] [-d start_directory] [-f log_facility] "
-	    "[-l log_level]\n\t[-P blacklisted_requests] "
-	    "[-p whitelisted_requests] [-u umask]\n"
-	    "       %s -Q protocol_feature\n",
-	    __progname, __progname);
+		"usage: %s [-ehR] [-d start_directory] [-f log_facility] "
+		"[-l log_level]\n\t[-P blacklisted_requests] "
+		"[-p whitelisted_requests] [-u umask]\n"
+		"       %s -Q protocol_feature\n",
+		progname, progname);
 	exit(1);
 }
 
