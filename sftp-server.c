@@ -34,6 +34,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 //#include <grp.h>
+#include <ctype.h>
 
 //#include <bsd/string.h>
 
@@ -514,6 +515,13 @@ xstrdup(const char *str)
 	return cp;
 }
 
+static void *
+xmemdup(const void *data, size_t size) {
+        void *copy = xmalloc(size);
+        memcpy(copy, data, size);
+        return copy;
+}
+
 static int
 xasprintf(char **ret, const char *fmt, ...)
 {
@@ -547,6 +555,17 @@ xreallocarray(void *ptr, size_t nmemb, size_t size)
 
 	fatal("xreallocarray: out of memory (%zu elements of %zu bytes)",
 	      nmemb, size);
+}
+
+static char *
+xstrcat(char *str, char *cat, size_t *new_len) {
+        size_t str_len = strlen(str);
+        size_t cat_len = strlen(cat);
+
+        str = xreallocarray(str, 1, str_len + cat_len + 1);
+        memmove(str + str_len, cat, cat_len + 1);
+        if (new_len) *new_len = str_len + cat_len;
+        return str;
 }
 
 static void
@@ -1467,18 +1486,18 @@ string_from_portable(int pflags)
 typedef struct Handle Handle;
 struct Handle {
 	int use;
-	DIR *dirp;
 	HANDLE fd;
 	int flags;
 	char *name;
 	uint64_t bytes_read, bytes_write;
 	int next_unused;
+        char *dir_start;
 };
 
 enum {
-	HANDLE_UNUSED,
-	HANDLE_DIR,
-	HANDLE_FILE
+	HANDLE_UNUSED = 0,
+	HANDLE_DIR    = 1,
+	HANDLE_FILE   = 2,
 };
 
 #define SEC_TO_POSIX_EPOCH 11644473600LL
@@ -1599,8 +1618,7 @@ handle_unused(int i)
 }
 
 static int
-handle_new(int use, const char *name, HANDLE fd, int flags, DIR *dirp)
-{
+handle_new(int use, const char *name, HANDLE fd, int flags, char *dir_start) {
 	int i;
 
 	if (first_unused_handle == -1) {
@@ -1617,19 +1635,28 @@ handle_new(int use, const char *name, HANDLE fd, int flags, DIR *dirp)
 	first_unused_handle = handles[i].next_unused;
 
 	handles[i].use = use;
-	handles[i].dirp = dirp;
 	handles[i].fd = fd;
 	handles[i].flags = flags;
 	handles[i].name = xstrdup(name);
 	handles[i].bytes_read = handles[i].bytes_write = 0;
-
+        handles[i].dir_start = (dir_start ? xstrdup(dir_start) : NULL);
 	return i;
 }
 
 static int
 handle_is_ok(int i, int type)
 {
-	return i >= 0 && (uint)i < num_handles && handles[i].use == type;
+	return i >= 0 && (uint)i < num_handles && (handles[i].use & type);
+}
+
+static char *
+handle_delete_dir_start(int i) {
+        char *start;
+        if (!handle_is_ok(i, HANDLE_DIR))
+                fatal("internal error: handle_delete_dir_start called on a non dir handle");
+        if (start = handles[i].dir_start)
+                handles.dir_start = NULL;
+        return start;
 }
 
 static int
@@ -1666,16 +1693,16 @@ handle_to_name(int handle)
 	return NULL;
 }
 
-static DIR *
-handle_to_dir(int handle)
+static HANDLE
+handle_to_win_dir_handle(int handle)
 {
 	if (handle_is_ok(handle, HANDLE_DIR))
-		return handles[handle].dirp;
-	return NULL;
+		return handles[handle].fd;
+	return INVALID_HANDLE_VALUE;
 }
 
 static HANDLE
-handle_to_fd(int handle)
+handle_to_win_file_handle(int handle)
 {
 	if (handle_is_ok(handle, HANDLE_FILE))
 		return handles[handle].fd;
@@ -1730,7 +1757,7 @@ handle_close(int handle)
 		free(handles[handle].name);
 		handle_unused(handle);
 	} else if (handle_is_ok(handle, HANDLE_DIR)) {
-		ret = closedir(handles[handle].dirp);
+		ret = closedir(handles[handle].fd);
 		free(handles[handle].name);
 		handle_unused(handle);
 	} else {
@@ -2104,8 +2131,6 @@ process_open(uint32_t id)
                         creation = TRUNCATE_EXISTING;
         }
 
-
-        
         if (readonly && (pflags & SSH2_FXF_WRITE)) {
                 verbose("Refusing open request in read-only mode");
                 status = SSH2_FX_PERMISSION_DENIED;
@@ -2165,7 +2190,7 @@ process_read(uint32_t id)
 		len = sizeof buf;
 		debug2("read change len %d", len);
 	}
-	fd = handle_to_fd(handle);
+	fd = handle_to_win_file_handle(handle);
 	if (fd != INVALID_HANDLE_VALUE) {
                 if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN)) {
 			error("process_read: seek failed");
@@ -2215,7 +2240,7 @@ process_write(uint32_t id)
 
 	debug("request %u: write \"%s\" (handle %d) off %llu len %zu",
 	    id, handle_to_name(handle), handle, (unsigned long long)off.QuadPart, len);
-	fd = handle_to_fd(handle);
+	fd = handle_to_win_file_handle(handle);
 
 	if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_FAILURE;
@@ -2308,7 +2333,7 @@ process_fstat(uint32_t id)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug("request %u: fstat \"%s\" (handle %u)",
 	    id, handle_to_name(handle), handle);
-	fd = handle_to_fd(handle);
+	fd = handle_to_win_file_handle(handle);
 	if (fd != INVALID_HANDLE_VALUE) {
                 BY_HANDLE_FILE_INFORMATION info;
                 if (GetFileInformationByHandle(fd, &info)) {
@@ -2384,7 +2409,7 @@ process_fsetstat(uint32_t id)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug("request %u: fsetstat handle %d", id, handle);
-	fd = handle_to_fd(handle);
+	fd = handle_to_win_file_handle(handle);
 	if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_FAILURE;
 	else {
@@ -2438,27 +2463,38 @@ process_fsetstat(uint32_t id)
 static void
 process_opendir(uint32_t id)
 {
-	DIR *dirp = NULL;
+        HANDLE dd;
 	char *path;
 	int r, handle, status = SSH2_FX_FAILURE;
+        size_t path_len;
+        WIN32_FIND_DATA find_data;
 
-	if ((r = sshbuf_get_cstring(iqueue, &path, NULL)) != 0)
+	if ((r = sshbuf_get_cstring(iqueue, &path, &path_len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: opendir", id);
 	logit("opendir \"%s\"", path);
-	dirp = opendir(path);
-	if (dirp == NULL) {
-		status = last_error_to_portable();
-	} else {
-		handle = handle_new(HANDLE_DIR, path, 0, 0, dirp);
+
+        if (path_len == 0 || (path_len == 2 && isalpha(path[0]) && path[1] == ':'))
+                path = xstrcat(path, "./*", &path_len);
+        else if (path[path_len - 1] == '/' || path[path_len - 1] == '\\')
+                path = xstrcat(path, "/*", &path_len);
+        else
+                path = xstrcat(path, "*", &path_len);
+
+        dd = FindFirstFile(path, &find_data);
+
+        if (dd == INVALID_HANDLE_VALUE) {
+                status = last_error_to_portable();
+        }
+        else {
+		handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
 		if (handle < 0) {
-			closedir(dirp);
+                        w_close(dd);
 		} else {
 			send_handle(id, handle);
 			status = SSH2_FX_OK;
 		}
-
 	}
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
@@ -2670,7 +2706,7 @@ ls_file(const char *name, const struct stat *st, int remote, int si_units)
 static void
 process_readdir(uint32_t id)
 {
-	DIR *dirp;
+        HANDLE dd;
 	struct dirent *dp;
 	char *path;
 	int r, handle;
@@ -2680,11 +2716,17 @@ process_readdir(uint32_t id)
 
 	debug("request %u: readdir \"%s\" (handle %d)", id,
 	    handle_to_name(handle), handle);
-	dirp = handle_to_dir(handle);
-	path = handle_to_name(handle);
-	if (dirp == NULL || path == NULL) {
+        path = handle_to_name(handle);
+	dd = handle_to_win_dir_handle(handle);
+	if (dd == INVALID_HANDLE_VALUE || path == NULL) {
 		send_status(id, SSH2_FX_FAILURE);
 	} else {
+                char *fn = handle_delete_dir_start(handle);
+                if (!fn) {
+                        WIN32_FIND_DATA find_data;
+                        if (FindNextFile(dd, &find_data)) {
+                                fn = &
+                }
 		struct stat st;
 		char pathname[PATH_MAX];
 		Stat *stats;
@@ -2968,7 +3010,7 @@ process_extended_fsync(uint32_t id)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug3("request %u: fsync (handle %u)", id, handle);
 	verbose("fsync \"%s\"", handle_to_name(handle));
-	fd = handle_to_fd(handle);
+	fd = handle_to_win_file_handle(handle);
         if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_NO_SUCH_FILE;
 	else if (handle_is_ok(handle, HANDLE_FILE)) {
