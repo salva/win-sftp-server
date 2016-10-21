@@ -1655,7 +1655,7 @@ handle_delete_dir_start(int i) {
         if (!handle_is_ok(i, HANDLE_DIR))
                 fatal("internal error: handle_delete_dir_start called on a non dir handle");
         if (start = handles[i].dir_start)
-                handles.dir_start = NULL;
+                handles[i].dir_start = NULL;
         return start;
 }
 
@@ -2706,6 +2706,8 @@ ls_file(const char *name, const struct stat *st, int remote, int si_units)
 static void
 process_readdir(uint32_t id)
 {
+        // TODO: Fix memory leaks!
+        
         HANDLE dd;
 	struct dirent *dp;
 	char *path;
@@ -2724,45 +2726,22 @@ process_readdir(uint32_t id)
                 char *fn = handle_delete_dir_start(handle);
                 if (!fn) {
                         WIN32_FIND_DATA find_data;
-                        if (FindNextFile(dd, &find_data)) {
-                                fn = &
+                        if (FindNextFile(dd, &find_data))
+                                fn = xstrdup(find_data.cFileName);
                 }
-		struct stat st;
-		char pathname[PATH_MAX];
-		Stat *stats;
-		int nstats = 10, count = 0, i;
-
-		stats = xcalloc(nstats, sizeof(Stat));
-		while ((dp = readdir(dirp)) != NULL) {
-			if (count >= nstats) {
-				nstats *= 2;
-				stats = xreallocarray(stats, nstats, sizeof(Stat));
-			}
-/* XXX OVERFLOW ? */
-			snprintf(pathname, sizeof pathname, "%s%s%s", path,
-			    strcmp(path, "/") ? "/" : "", dp->d_name);
-			if (w_lstat(pathname, &st) < 0)
-				continue;
-			stat_to_attrib(&st, &(stats[count].attrib));
-			stats[count].name = xstrdup(dp->d_name);
-			stats[count].long_name = ls_file(dp->d_name, &st, 0, 0);
-			count++;
-			/* send up to 100 entries in one message */
-			/* XXX check packet size instead */
-			if (count == 100)
-				break;
-		}
-		if (count > 0) {
-			send_names(id, count, stats);
-			for (i = 0; i < count; i++) {
-				free(stats[i].name);
-				free(stats[i].long_name);
-			}
-		} else {
-			send_status(id, SSH2_FX_EOF);
-		}
-		free(stats);
-	}
+                if (fn) {
+                        Stat stats;
+                        char pathname[PATH_MAX];
+                        attrib_clear(&(stats.attrib));
+                        snprintf(pathname, sizeof pathname, "%s%s%s", path,
+                                 strcmp(path, "/") ? "/" : "", fn);
+                        stats.name = fn;
+                        stats.long_name = xstrdup("doo fba fjkd");
+                        send_names(id, 1, &stats);
+                }
+                else
+                        send_status(id, SSH2_FX_EOF);
+        }
 }
 
 static void
