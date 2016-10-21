@@ -15,7 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <Windows.h>
+#include <windows.h>
 
 #define _GNU_SOURCE
 
@@ -145,7 +145,7 @@ struct sshbuf {
 };
 
 /* Our verbosity */
-static LogLevel log_level = SYSLOG_LEVEL_ERROR;
+static LogLevel log_level = 0; //SYSLOG_LEVEL_ERROR;
 
 /* Our client */
 struct passwd {
@@ -313,12 +313,12 @@ strlcpy(char *dst, const char *src, size_t siz)
 #define S_ISUID 2048
 #define S_ISGID 1024
 #define S_ISVTX 512
-#define S_IRGRP 32
-#define S_IWGRP 16
-#define S_IXGRP 8
-#define S_IROTH 4
-#define S_IWOTH 2
-#define S_IXOTH 1
+//#define S_IRGRP 32
+//#define S_IWGRP 16
+//#define S_IXGRP 8
+//#define S_IROTH 4
+//#define S_IWOTH 2
+//#define S_IXOTH 1
 
 void
 strmode(int mode, char *p)
@@ -427,50 +427,50 @@ strmode(int mode, char *p)
 	*p = '\0';
 }
 
-static int
-vasprintf(char **str, const char *fmt, va_list ap)
-{
-	const int INIT_SZ = 128;
-	int ret = -1;
-	va_list ap2;
-	char *string, *newstr;
-	size_t len;
+/* static int */
+/* vasprintf(char **str, const char *fmt, va_list ap) */
+/* { */
+/* 	const int INIT_SZ = 128; */
+/* 	int ret = -1; */
+/* 	va_list ap2; */
+/* 	char *string, *newstr; */
+/* 	size_t len; */
 
-	va_copy(ap2, ap);
-	if ((string = malloc(INIT_SZ)) == NULL)
-		goto fail;
+/* 	va_copy(ap2, ap); */
+/* 	if ((string = malloc(INIT_SZ)) == NULL) */
+/* 		goto fail; */
 
-	ret = vsnprintf(string, INIT_SZ, fmt, ap2);
-	if (ret >= 0 && ret < INIT_SZ) { /* succeeded with initial alloc */
-		*str = string;
-	} else if (ret == INT_MAX || ret < 0) { /* Bad length */
-		free(string);
-		goto fail;
-	} else {	/* bigger than initial, realloc allowing for nul */
-		len = (size_t)ret + 1;
-		if ((newstr = realloc(string, len)) == NULL) {
-			free(string);
-			goto fail;
-		} else {
-			va_end(ap2);
-			va_copy(ap2, ap);
-			ret = vsnprintf(newstr, len, fmt, ap2);
-			if (ret >= 0 && (size_t)ret < len) {
-				*str = newstr;
-			} else { /* failed with realloc'ed string, give up */
-				free(newstr);
-				goto fail;
-			}
-		}
-	}
-	va_end(ap2);
-	return (ret);
+/* 	ret = vsnprintf(string, INIT_SZ, fmt, ap2); */
+/* 	if (ret >= 0 && ret < INIT_SZ) { /\* succeeded with initial alloc *\/ */
+/* 		*str = string; */
+/* 	} else if (ret == INT_MAX || ret < 0) { /\* Bad length *\/ */
+/* 		free(string); */
+/* 		goto fail; */
+/* 	} else {	/\* bigger than initial, realloc allowing for nul *\/ */
+/* 		len = (size_t)ret + 1; */
+/* 		if ((newstr = realloc(string, len)) == NULL) { */
+/* 			free(string); */
+/* 			goto fail; */
+/* 		} else { */
+/* 			va_end(ap2); */
+/* 			va_copy(ap2, ap); */
+/* 			ret = vsnprintf(newstr, len, fmt, ap2); */
+/* 			if (ret >= 0 && (size_t)ret < len) { */
+/* 				*str = newstr; */
+/* 			} else { /\* failed with realloc'ed string, give up *\/ */
+/* 				free(newstr); */
+/* 				goto fail; */
+/* 			} */
+/* 		} */
+/* 	} */
+/* 	va_end(ap2); */
+/* 	return (ret); */
 
-fail:
-	*str = NULL;
-	va_end(ap2);
-	fatal("vasprintf: out of memory");
-}
+/* fail: */
+/* 	*str = NULL; */
+/* 	va_end(ap2); */
+/* 	fatal("vasprintf: out of memory"); */
+/* } */
 
 static void *
 xmalloc(size_t size)
@@ -567,7 +567,7 @@ do_log(LogLevel level, const char *fmt, va_list args)
 	int saved_error = GetLastError();
 
 	if (level > log_level)
-		return;
+		; //return;
 
 	switch (level) {
 	case SYSLOG_LEVEL_FATAL:
@@ -598,7 +598,7 @@ do_log(LogLevel level, const char *fmt, va_list args)
 		fprintf(stderr, "%s: ", txt);
         vfprintf(stderr, fmt, args);
 	fprintf(stderr, "\r\n");
-
+        fflush(stderr);
 	SetLastError(saved_error);
 }
 
@@ -1409,29 +1409,29 @@ last_error_to_portable(void)
 /* 	return ret; */
 /* } */
 
-static int
-flags_from_portable(int pflags)
-{
-	int flags = 0;
+/* static int */
+/* flags_from_portable(int pflags) */
+/* { */
+/* 	int flags = 0; */
 
-	if ((pflags & SSH2_FXF_READ) &&
-	    (pflags & SSH2_FXF_WRITE)) {
-		flags = O_RDWR;
-	} else if (pflags & SSH2_FXF_READ) {
-		flags = O_RDONLY;
-	} else if (pflags & SSH2_FXF_WRITE) {
-		flags = O_WRONLY;
-	}
-	if (pflags & SSH2_FXF_APPEND)
-		flags |= O_APPEND;
-	if (pflags & SSH2_FXF_CREAT)
-		flags |= O_CREAT;
-	if (pflags & SSH2_FXF_TRUNC)
-		flags |= O_TRUNC;
-	if (pflags & SSH2_FXF_EXCL)
-		flags |= O_EXCL;
-	return flags;
-}
+/* 	if ((pflags & SSH2_FXF_READ) && */
+/* 	    (pflags & SSH2_FXF_WRITE)) { */
+/* 		flags = O_RDWR; */
+/* 	} else if (pflags & SSH2_FXF_READ) { */
+/* 		flags = O_RDONLY; */
+/* 	} else if (pflags & SSH2_FXF_WRITE) { */
+/* 		flags = O_WRONLY; */
+/* 	} */
+/* 	if (pflags & SSH2_FXF_APPEND) */
+/* 		flags |= O_APPEND; */
+/* 	if (pflags & SSH2_FXF_CREAT) */
+/* 		flags |= O_CREAT; */
+/* 	if (pflags & SSH2_FXF_TRUNC) */
+/* 		flags |= O_TRUNC; */
+/* 	if (pflags & SSH2_FXF_EXCL) */
+/* 		flags |= O_EXCL; */
+/* 	return flags; */
+/* } */
 
 static const char *
 string_from_portable(int pflags)
@@ -1484,7 +1484,7 @@ enum {
 #define SEC_TO_POSIX_EPOCH 11644473600LL
 #define WINDOWS_TICKS_PER_SECOND 10000000
 static FILETIME
-time_posix2win(uint64_t posix_time)
+posix_time_to_win(uint64_t posix_time)
 {
 	FILETIME ft;
 	uint64_t win_time = ((posix_time + SEC_TO_POSIX_EPOCH) * WINDOWS_TICKS_PER_SECOND);
@@ -1493,12 +1493,18 @@ time_posix2win(uint64_t posix_time)
 	return ft;
 }
 
+static uint64_t
+win_time_to_posix(FILETIME ft) {
+        uint64_t win_time = (((uint64_t)ft.dwHighDateTime) << 32) + ft.dwLowDateTime;
+        return win_time / WINDOWS_TICKS_PER_SECOND - SEC_TO_POSIX_EPOCH;
+}
+
 static int
 w_utimes(char *name, uint32_t mtime, uint32_t atime)
 {
 
-	FILETIME wmtime = time_posix2win(mtime);
-	FILETIME watime = time_posix2win(atime);
+	FILETIME wmtime = posix_time_to_win(mtime);
+	FILETIME watime = posix_time_to_win(atime);
 
 	int rc = 0;
 	HANDLE h = CreateFile(name, FILE_WRITE_ATTRIBUTES, 0,
@@ -1560,7 +1566,7 @@ w_readlink(char *path, char *buf, size_t size) {
 }
 
 static int
-w_fsync(int fd) {
+w_fsync(HANDLE fd) {
 	// TODO: implement me!
 	error("w_fsync(%d, ...) <- unimplemented", fd);
 	SetLastError(ERROR_NOT_SUPPORTED);
@@ -1571,15 +1577,22 @@ static int
 w_close(HANDLE h) {
 	if (!CloseHandle(h))
 		return -1;
-	return;
+	return 0;
+}
+
+static int
+w_ftruncate(HANDLE h, off_t length) {
+        return -1;
 }
 
 Handle *handles = NULL;
 uint num_handles = 0;
 int first_unused_handle = -1;
 
-static void handle_unused(int i)
+static void
+handle_unused(int i)
 {
+        debug("handle_unused(%d)", i);
 	handles[i].use = HANDLE_UNUSED;
 	handles[i].next_unused = first_unused_handle;
 	first_unused_handle = i;
@@ -1591,11 +1604,13 @@ handle_new(int use, const char *name, HANDLE fd, int flags, DIR *dirp)
 	int i;
 
 	if (first_unused_handle == -1) {
-		if (num_handles + 1 <= num_handles)
+                int next_num = num_handles * 3 / 2 + 5;
+		if (next_num <= num_handles)
 			return -1;
-		num_handles++;
-		handles = xreallocarray(handles, num_handles, sizeof(Handle));
-		handle_unused(num_handles - 1);
+		handles = xreallocarray(handles, next_num, sizeof(Handle));
+                for (i = num_handles + 1; i < next_num; i++)
+                        handle_unused(i);
+                num_handles = next_num;
 	}
 
 	i = first_unused_handle;
@@ -1914,6 +1929,30 @@ stat_to_attrib(const struct stat *st, Attrib *a)
 }
 
 static int
+win_attrib_to_posix_mode(DWORD attrib) {
+        int mode = 0;
+        if (attrib & FILE_ATTRIBUTE_DIRECTORY)
+                mode |=  040000;
+        else if (attrib & FILE_ATTRIBUTE_NORMAL)
+                mode |= 0100000;
+        mode |= 0700;
+        return mode;
+}
+
+static void
+file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a) {
+	attrib_clear(a);
+        a->flags = 0;
+        a->flags |= SSH2_FILEXFER_ATTR_SIZE;
+        a->size = (((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow;
+        a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
+        a->perm = win_attrib_to_posix_mode(info->dwFileAttributes);
+        a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
+	a->atime = win_time_to_posix(info->ftLastAccessTime);
+        a->mtime = win_time_to_posix(info->ftLastWriteTime);
+}
+
+static int
 decode_attrib(struct sshbuf *b, Attrib *a)
 {
 	int r;
@@ -2039,7 +2078,7 @@ process_open(uint32_t id)
 	int r, handle, status = SSH2_FX_FAILURE;
 	HANDLE fd;
 	DWORD access = 0;
-	DWORD creation = 0;
+	DWORD creation = OPEN_EXISTING;
 
 	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0 ||
 	    (r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
@@ -2047,54 +2086,45 @@ process_open(uint32_t id)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: open flags %d", id, pflags);
-	flags = flags_from_portable(pflags);
 
 	if (pflags & SSH2_FXF_READ)
 		access |= GENERIC_READ;
-	if (pflags & SSH2_FXF_WRITE)
-		access |= GENERIC_WRITE;
+	if (pflags & SSH2_FXF_WRITE) {
+                access |= GENERIC_WRITE;
 
-	if (pflags & SSH2_FXF_CREAT) {
-		if (pflags & SSH2_FXF_EXCL)
-			creation = CREATE_NEW;
-		else {
-			if ((pflags & SSH2_FXF_TRUNC) && (pflags & SSH2_FXF_WRITE))
-				creation = CREATE_ALWAYS;
+                if (pflags & SSH2_FXF_CREAT) {
+                        if (pflags & SSH2_FXF_EXCL)
+                                creation = CREATE_NEW;
+                        else if (pflags & SSH2_FXF_TRUNC)
+                                creation = CREATE_ALWAYS;
 			else
 				creation = OPEN_ALWAYS;
 		}
+                else if (pflags & SSH2_FXF_TRUNC)
+                        creation = TRUNCATE_EXISTING;
+        }
 
-		WORKING HERE!!!!
-		
-	}
-	else if ((pflags & SSH2_FXF_TRUNC) && (pflags & SSH2_FXF_WRITE))
-		creation = TRUNCATE_EXISTING;
-	else
-		creation = OPEN_EXISTING;
 
-	mode = (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) ? a.perm : 0666;
-	logit("open \"%s\" flags %s mode 0%o",
-	    name, string_from_portable(pflags), mode);
-	if (readonly &&
-	    ((flags & O_ACCMODE) == O_WRONLY ||
-	    (flags & O_ACCMODE) == O_RDWR)) {
-		verbose("Refusing open request in read-only mode");
-		status = SSH2_FX_PERMISSION_DENIED;
-	} else {
-		fd = open(name, flags, mode);
-		fd = CreateFile(name, mode, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTES_NORMAL, NULL)
+        
+        if (readonly && (pflags & SSH2_FXF_WRITE)) {
+                verbose("Refusing open request in read-only mode");
+                status = SSH2_FX_PERMISSION_DENIED;
+        }
+        else {
+		fd = CreateFile(name, access, 0, NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (fd == INVALID_HANDLE_VALUE) {
 			status = last_error_to_portable();
 		} else {
-			handle = handle_new(HANDLE_FILE, name, fd, flags, NULL);
+			handle = handle_new(HANDLE_FILE, name, fd, pflags, NULL);
 			if (handle < 0) {
-				close(fd);
+				w_close(fd);
 			} else {
 				send_handle(id, handle);
 				status = SSH2_FX_OK;
 			}
 		}
 	}
+cleanup:
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
 	free(name);
@@ -2122,37 +2152,49 @@ process_read(uint32_t id)
 	uint32_t len;
 	int r, handle, ret, status = SSH2_FX_FAILURE;
 	HANDLE fd;
-	uint64_t off;
+	LARGE_INTEGER off;
 
 	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = sshbuf_get_u64(iqueue, &off)) != 0 ||
-	    (r = sshbuf_get_u32(iqueue, &len)) != 0)
+	    (r = sshbuf_get_u64(iqueue, &(off.QuadPart))) != 0 ||
+            (r = sshbuf_get_u32(iqueue, &len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug("request %u: read \"%s\" (handle %d) off %llu len %d",
-	    id, handle_to_name(handle), handle, (unsigned long long)off, len);
+              id, handle_to_name(handle), handle, (unsigned long long)(off.QuadPart), len);
 	if (len > sizeof buf) {
 		len = sizeof buf;
 		debug2("read change len %d", len);
 	}
 	fd = handle_to_fd(handle);
 	if (fd != INVALID_HANDLE_VALUE) {
-		if (lseek(fd, off, SEEK_SET) < 0) {
+                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN)) {
 			error("process_read: seek failed");
-			status = last_error_to_portable();
+                        status = last_error_to_portable();
 		} else {
-			ret = read(fd, buf, len);
-			if (ret < 0) {
-				status = last_error_to_portable();
-			} else if (ret == 0) {
-				status = SSH2_FX_EOF;
-			} else {
-				send_data(id, buf, ret);
-				status = SSH2_FX_OK;
-				handle_update_read(handle, ret);
-			}
-		}
-	}
+                        uint32_t off = 0;
+                        while (len > off) {
+                                DWORD read;
+                                if (ReadFile(fd, buf + off, len - off, &read, NULL)) {
+                                        if (read) {
+                                                off += read;
+                                                handle_update_read(handle, read);
+                                        }
+                                        else { // EOF!
+                                                if (!off) status = SSH2_FX_EOF;
+                                                break;
+                                        }
+                                }
+                                else {
+                                        if (!off) status = last_error_to_portable();
+                                        break;
+                                }
+                        }
+                        if (off || !len) {
+                                send_data(id, buf, off);
+                                status = SSH2_FX_OK;
+                        }
+                }
+        }
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
 }
@@ -2160,40 +2202,53 @@ process_read(uint32_t id)
 static void
 process_write(uint32_t id)
 {
-	uint64_t off;
+	LARGE_INTEGER off;
 	size_t len;
-	int r, handle, fd, ret, status;
+	int r, handle, ret, status = SSH2_FX_FAILURE;
+        HANDLE fd;
 	uint8_t *data;
 
 	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = sshbuf_get_u64(iqueue, &off)) != 0 ||
+	    (r = sshbuf_get_u64(iqueue, &(off.QuadPart))) != 0 ||
 	    (r = sshbuf_get_string(iqueue, &data, &len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug("request %u: write \"%s\" (handle %d) off %llu len %zu",
-	    id, handle_to_name(handle), handle, (unsigned long long)off, len);
+	    id, handle_to_name(handle), handle, (unsigned long long)off.QuadPart, len);
 	fd = handle_to_fd(handle);
 
-	if (fd < 0)
+	if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_FAILURE;
 	else {
-		if (!(handle_to_flags(handle) & O_APPEND) &&
-				lseek(fd, off, SEEK_SET) < 0) {
+		if (!(handle_to_flags(handle) & SSH2_FXF_APPEND) &&
+                    !SetFilePointerEx(fd, off, NULL, FILE_BEGIN)) {
 			status = last_error_to_portable();
 			error("process_write: seek failed");
 		} else {
 /* XXX ATOMICIO ? */
-			ret = write(fd, data, len);
-			if (ret < 0) {
-				error("process_write: write failed");
-				status = last_error_to_portable();
-			} else if ((size_t)ret == len) {
-				status = SSH2_FX_OK;
-				handle_update_write(handle, ret);
-			} else {
-				debug2("nothing at all written");
-				status = SSH2_FX_FAILURE;
+                        while (len) {
+                                DWORD written;
+                                if (WriteFile(fd, data, len, &written, NULL)) {
+                                        if (written <= len) {
+                                                data += written;
+                                                len -= written;
+                                                handle_update_write(handle, written);
+                                        } else {
+                                                error("Internal error: too much data written (%d)", written);
+                                                status = SSH2_FX_FAILURE;
+                                                break;
+                                        }
+                                }
+                                else {
+                                        error("process_write: write failed");
+                                        status = last_error_to_portable();
+                                        break;
+                                }
+                                
 			}
+                        if (len == 0)
+                                status = SSH2_FX_OK;
+
 		}
 	}
 	send_status(id, status);
@@ -2246,23 +2301,24 @@ static void
 process_fstat(uint32_t id)
 {
 	Attrib a;
-	struct stat st;
-	int fd, r, handle, status = SSH2_FX_FAILURE;
-
+	int r, handle, status = SSH2_FX_FAILURE;
+        HANDLE fd;
+        
 	if ((r = get_handle(iqueue, &handle)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug("request %u: fstat \"%s\" (handle %u)",
 	    id, handle_to_name(handle), handle);
 	fd = handle_to_fd(handle);
-	if (fd >= 0) {
-		r = fstat(fd, &st);
-		if (r < 0) {
+	if (fd != INVALID_HANDLE_VALUE) {
+                BY_HANDLE_FILE_INFORMATION info;
+                if (GetFileInformationByHandle(fd, &info)) {
+                        file_info_to_attrib(&info, &a);
+                        send_attrib(id, &a);
+			status = SSH2_FX_OK;                        
+                }
+                else {
 			status = last_error_to_portable();
-		} else {
-			stat_to_attrib(&st, &a);
-			send_attrib(id, &a);
-			status = SSH2_FX_OK;
-		}
+                }
 	}
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
@@ -2319,7 +2375,8 @@ static void
 process_fsetstat(uint32_t id)
 {
 	Attrib a;
-	int handle, fd, r;
+	int handle, r;
+        HANDLE fd;
 	int status = SSH2_FX_OK;
 
 	if ((r = get_handle(iqueue, &handle)) != 0 ||
@@ -2328,7 +2385,7 @@ process_fsetstat(uint32_t id)
 
 	debug("request %u: fsetstat handle %d", id, handle);
 	fd = handle_to_fd(handle);
-	if (fd < 0)
+	if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_FAILURE;
 	else {
 		char *name = handle_to_name(handle);
@@ -2336,7 +2393,7 @@ process_fsetstat(uint32_t id)
 		if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
 			logit("set \"%s\" size %llu",
 			    name, (unsigned long long)a.size);
-			r = ftruncate(fd, a.size);
+			r = w_ftruncate(fd, a.size);
 			if (r == -1)
 				status = last_error_to_portable();
 		}
@@ -2904,13 +2961,15 @@ process_extended_hardlink(uint32_t id)
 static void
 process_extended_fsync(uint32_t id)
 {
-	int handle, fd, r, status = SSH2_FX_OP_UNSUPPORTED;
+	int handle, r, status = SSH2_FX_OP_UNSUPPORTED;
+        HANDLE fd;
 
 	if ((r = get_handle(iqueue, &handle)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug3("request %u: fsync (handle %u)", id, handle);
 	verbose("fsync \"%s\"", handle_to_name(handle));
-	if ((fd = handle_to_fd(handle)) < 0)
+	fd = handle_to_fd(handle);
+        if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_NO_SUCH_FILE;
 	else if (handle_is_ok(handle, HANDLE_FILE)) {
 		r = w_fsync(fd);
