@@ -568,6 +568,29 @@ xstrcat(char *str, char *cat, size_t *new_len) {
         return str;
 }
 
+static char *
+xpathcat(char *base, char *name) {
+        char *long_name;
+        // FIXME: handle case where name starts by '\\' or '/' 
+        if (isalpha(name[0]) && name[1] == ':' &&
+            (name[2] == '/' || name[2] == '\\'))
+                long_name = xstrdup(name);
+        else {
+                int base_len  = strlen(base);
+                int name_len = strlen(name);
+                if (!base_len) {
+                        base = ".\\";
+                        base_len = 2;
+                }
+                long_name = xmalloc(base_len + name_len + 2);
+                memcpy(long_name, base, base_len);
+                if (base[base_len - 1] != '/' && base[base_len - 1] != '\\')
+                        long_name[base_len++] = '/';
+                memcpy(long_name + base_len, name, name_len + 1);
+        }
+        return long_name;
+}
+
 static void
 fatal(const char *fmt,...)
 {
@@ -1560,6 +1583,69 @@ w_lstat(char *name, struct stat *st) {
 	return -1;
 }
 
+static void
+attrib_clear(Attrib *a)
+{
+	a->flags = 0;
+	a->size = 0;
+	a->uid = 0;
+	a->gid = 0;
+	a->perm = 0;
+	a->atime = 0;
+	a->mtime = 0;
+}
+
+static int
+win_attrib_to_posix_mode(DWORD attrib) {
+        int mode = 0;
+        if (attrib & FILE_ATTRIBUTE_DIRECTORY)
+                mode |=  040000;
+        else if (attrib & FILE_ATTRIBUTE_NORMAL)
+                mode |= 0100000;
+        mode |= 0700;
+        return mode;
+}
+
+static void
+file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a) {
+	attrib_clear(a);
+        a->flags |= SSH2_FILEXFER_ATTR_SIZE;
+        a->size = (((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow;
+        a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
+        a->perm = win_attrib_to_posix_mode(info->dwFileAttributes);
+        a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
+	a->atime = win_time_to_posix(info->ftLastAccessTime);
+        a->mtime = win_time_to_posix(info->ftLastWriteTime);
+}
+
+static int
+w_hstat(HANDLE h, Attrib *a) {
+        BY_HANDLE_FILE_INFORMATION file_info;
+        if (GetFileInformationByHandle(h, &file_info)) {
+                file_info_to_attrib(&file_info, a);
+                return 1;
+        }
+        else {
+                attrib_clear(a);
+                return 0;
+        }
+}
+
+static int
+w_stat(char *name, Attrib *a) {
+        HANDLE h = CreateFile(name, FILE_READ_ATTRIBUTES, 0,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+                int rc = w_hstat(h, a);
+                CloseHandle(h);
+                return rc;
+        }
+        else {
+                attrib_clear(a);
+                return 0;
+        }
+ }
+
 static int
 w_link(char *oldpath, char *newpath) {
 	// TODO: implement me!
@@ -1757,7 +1843,7 @@ handle_close(int handle)
 		free(handles[handle].name);
 		handle_unused(handle);
 	} else if (handle_is_ok(handle, HANDLE_DIR)) {
-		ret = closedir(handles[handle].fd);
+		ret = w_close(handles[handle].fd);
 		free(handles[handle].name);
 		handle_unused(handle);
 	} else {
@@ -1927,18 +2013,6 @@ encode_attrib(struct sshbuf *b, const Attrib *a)
 }
 
 static void
-attrib_clear(Attrib *a)
-{
-	a->flags = 0;
-	a->size = 0;
-	a->uid = 0;
-	a->gid = 0;
-	a->perm = 0;
-	a->atime = 0;
-	a->mtime = 0;
-}
-
-static void
 stat_to_attrib(const struct stat *st, Attrib *a)
 {
 	attrib_clear(a);
@@ -1953,30 +2027,6 @@ stat_to_attrib(const struct stat *st, Attrib *a)
 	a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
 	a->atime = st->st_atime;
 	a->mtime = st->st_mtime;
-}
-
-static int
-win_attrib_to_posix_mode(DWORD attrib) {
-        int mode = 0;
-        if (attrib & FILE_ATTRIBUTE_DIRECTORY)
-                mode |=  040000;
-        else if (attrib & FILE_ATTRIBUTE_NORMAL)
-                mode |= 0100000;
-        mode |= 0700;
-        return mode;
-}
-
-static void
-file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a) {
-	attrib_clear(a);
-        a->flags = 0;
-        a->flags |= SSH2_FILEXFER_ATTR_SIZE;
-        a->size = (((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow;
-        a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
-        a->perm = win_attrib_to_posix_mode(info->dwFileAttributes);
-        a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
-	a->atime = win_time_to_posix(info->ftLastAccessTime);
-        a->mtime = win_time_to_posix(info->ftLastWriteTime);
 }
 
 static int
@@ -2335,11 +2385,9 @@ process_fstat(uint32_t id)
 	    id, handle_to_name(handle), handle);
 	fd = handle_to_win_file_handle(handle);
 	if (fd != INVALID_HANDLE_VALUE) {
-                BY_HANDLE_FILE_INFORMATION info;
-                if (GetFileInformationByHandle(fd, &info)) {
-                        file_info_to_attrib(&info, &a);
+                if (w_hstat(fd, &a)) {
                         send_attrib(id, &a);
-			status = SSH2_FX_OK;                        
+			status = SSH2_FX_OK;
                 }
                 else {
 			status = last_error_to_portable();
@@ -2730,13 +2778,12 @@ process_readdir(uint32_t id)
                                 fn = xstrdup(find_data.cFileName);
                 }
                 if (fn) {
+                        // TODO: send more than one entry per packet
                         Stat stats;
-                        char pathname[PATH_MAX];
                         attrib_clear(&(stats.attrib));
-                        snprintf(pathname, sizeof pathname, "%s%s%s", path,
-                                 strcmp(path, "/") ? "/" : "", fn);
                         stats.name = fn;
-                        stats.long_name = xstrdup("doo fba fjkd");
+                        stats.long_name = xpathcat(path, fn);
+                        w_stat(stats.long_name, &(stats.attrib));
                         send_names(id, 1, &stats);
                 }
                 else
