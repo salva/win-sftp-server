@@ -516,7 +516,7 @@ xstrdup(const char *str)
 }
 
 static void *
-xmemdup(const void *data, size_t size) {
+xcopy(const void *data, size_t size) {
         void *copy = xmalloc(size);
         memcpy(copy, data, size);
         return copy;
@@ -1391,6 +1391,8 @@ sshbuf_reset(struct sshbuf *buf)
 /* 	return 1; */
 /* } */
 
+#define tell_error(msg) verbose("%s: %d at %s", (msg), GetLastError(), __func__)
+
 static int
 last_error_to_portable(void)
 {
@@ -1626,6 +1628,7 @@ w_hstat(HANDLE h, Attrib *a) {
                 return 1;
         }
         else {
+                tell_error("GetFileInformationByHandle");
                 attrib_clear(a);
                 return 0;
         }
@@ -1633,14 +1636,17 @@ w_hstat(HANDLE h, Attrib *a) {
 
 static int
 w_stat(char *name, Attrib *a) {
-        HANDLE h = CreateFile(name, FILE_READ_ATTRIBUTES, 0,
-                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE h = CreateFile(name,
+                              FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
         if (h != INVALID_HANDLE_VALUE) {
                 int rc = w_hstat(h, a);
                 CloseHandle(h);
                 return rc;
         }
         else {
+                tell_error("CreateFile failed");
                 attrib_clear(a);
                 return 0;
         }
@@ -2512,7 +2518,7 @@ static void
 process_opendir(uint32_t id)
 {
         HANDLE dd;
-	char *path;
+	char *path, *pattern;
 	int r, handle, status = SSH2_FX_FAILURE;
         size_t path_len;
         WIN32_FIND_DATA find_data;
@@ -2524,15 +2530,18 @@ process_opendir(uint32_t id)
 	logit("opendir \"%s\"", path);
 
         if (path_len == 0 || (path_len == 2 && isalpha(path[0]) && path[1] == ':'))
-                path = xstrcat(path, "./*", &path_len);
+                path = xstrcat(path, "./", &path_len);
         else if (path[path_len - 1] == '/' || path[path_len - 1] == '\\')
-                path = xstrcat(path, "/*", &path_len);
+                path = xstrcat(path, "/", &path_len);
         else
-                path = xstrcat(path, "*", &path_len);
+                path = xcopy(path, path_len + 1);
+        
+        pattern = xstrcat(xcopy(path, path_len + 1), "*", &path_len);
 
-        dd = FindFirstFile(path, &find_data);
+        dd = FindFirstFile(pattern, &find_data);
 
         if (dd == INVALID_HANDLE_VALUE) {
+                tell_error("FindFirstFile failed");
                 status = last_error_to_portable();
         }
         else {
@@ -2547,6 +2556,7 @@ process_opendir(uint32_t id)
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
 	free(path);
+        free(pattern);
 }
 
 #define	FMT_SCALED_STRSIZE	7
@@ -2776,6 +2786,8 @@ process_readdir(uint32_t id)
                         WIN32_FIND_DATA find_data;
                         if (FindNextFile(dd, &find_data))
                                 fn = xstrdup(find_data.cFileName);
+                        else
+                                tell_error("FindNextFile failed");
                 }
                 if (fn) {
                         // TODO: send more than one entry per packet
