@@ -1520,9 +1520,9 @@ struct Handle {
 };
 
 enum {
-	HANDLE_UNUSED = 0,
-	HANDLE_DIR    = 1,
-	HANDLE_FILE   = 2,
+	HANDLE_USED = 1,
+	HANDLE_DIR  = 2,
+	HANDLE_FILE = 4,
 };
 
 #define SEC_TO_POSIX_EPOCH 11644473600LL
@@ -1697,14 +1697,14 @@ w_ftruncate(HANDLE h, off_t length) {
 }
 
 Handle *handles = NULL;
-uint num_handles = 0;
+int num_handles = 0;
 int first_unused_handle = -1;
 
 static void
 handle_unused(int i)
 {
         debug("handle_unused(%d)", i);
-	handles[i].use = HANDLE_UNUSED;
+	handles[i].use = 0;
 	handles[i].next_unused = first_unused_handle;
 	first_unused_handle = i;
 }
@@ -1718,7 +1718,7 @@ handle_new(int use, const char *name, HANDLE fd, int flags, char *dir_start) {
 		if (next_num <= num_handles)
 			return -1;
 		handles = xreallocarray(handles, next_num, sizeof(Handle));
-                for (i = num_handles + 1; i < next_num; i++)
+                for (i = next_num - 1; i >= num_handles; i--)
                         handle_unused(i);
                 num_handles = next_num;
 	}
@@ -1726,7 +1726,10 @@ handle_new(int use, const char *name, HANDLE fd, int flags, char *dir_start) {
 	i = first_unused_handle;
 	first_unused_handle = handles[i].next_unused;
 
-	handles[i].use = use;
+	debug3("handle_new(use: %d, name: %s, HANDLE: 0x%x, flags: 0x%x, %s) -> %d",
+	       use, name, fd, flags, dir_start, i);
+
+	handles[i].use = (use | HANDLE_USED);
 	handles[i].fd = fd;
 	handles[i].flags = flags;
 	handles[i].name = xstrdup(name);
@@ -1738,17 +1741,18 @@ handle_new(int use, const char *name, HANDLE fd, int flags, char *dir_start) {
 static int
 handle_is_ok(int i, int type)
 {
-	return i >= 0 && (uint)i < num_handles && (handles[i].use & type);
+	return i >= 0 && (uint)i < num_handles &&
+		(handles[i].use & HANDLE_USED) && (handles[i].use & type);
 }
 
 static char *
-handle_delete_dir_start(int i) {
+handle_dir_start_and_reset(int i) {
         char *start;
         if (!handle_is_ok(i, HANDLE_DIR))
                 fatal("internal error: handle_delete_dir_start called on a non dir handle");
-        if (start = handles[i].dir_start)
-                handles[i].dir_start = NULL;
-        return start;
+        start = handles[i].dir_start;
+	handles[i].dir_start = NULL;
+	return start;
 }
 
 static int
@@ -1770,8 +1774,7 @@ handle_from_string(const uint8_t *handle, uint hlen)
 	if (hlen != sizeof(int32_t))
 		return -1;
 	val = get_u32(handle);
-	if (handle_is_ok(val, HANDLE_FILE) ||
-	    handle_is_ok(val, HANDLE_DIR))
+	if (handle_is_ok(val, HANDLE_FILE|HANDLE_DIR))
 		return val;
 	return -1;
 }
@@ -1779,8 +1782,7 @@ handle_from_string(const uint8_t *handle, uint hlen)
 static char *
 handle_to_name(int handle)
 {
-	if (handle_is_ok(handle, HANDLE_DIR)||
-	    handle_is_ok(handle, HANDLE_FILE))
+	if (handle_is_ok(handle, HANDLE_FILE|HANDLE_DIR))
 		return handles[handle].name;
 	return NULL;
 }
@@ -1842,20 +1844,23 @@ handle_bytes_write(int handle)
 static int
 handle_close(int handle)
 {
-	int ret = -1;
-
 	if (handle_is_ok(handle, HANDLE_FILE)) {
-		ret = w_close(handles[handle].fd);
-		free(handles[handle].name);
-		handle_unused(handle);
-	} else if (handle_is_ok(handle, HANDLE_DIR)) {
-		ret = w_close(handles[handle].fd);
-		free(handles[handle].name);
-		handle_unused(handle);
-	} else {
-		SetLastError(ERROR_INVALID_HANDLE);
+		CloseHandle(handles[handle].fd);
 	}
-	return ret;
+	else if (handle_is_ok(handle, HANDLE_DIR)) {
+		FindClose(handles[handle].fd);
+	}
+	else {
+		SetLastError(ERROR_INVALID_HANDLE);
+		return -1;
+	}
+
+	if (handles[handle].name)
+		free(handles[handle].name);
+	if (handles[handle].dir_start)
+		free(handles[handle].dir_start);
+
+	return 0;
 }
 
 static void
@@ -1880,7 +1885,7 @@ handle_log_exit(void)
 	uint i;
 
 	for (i = 0; i < num_handles; i++)
-		if (handles[i].use != HANDLE_UNUSED)
+		if (handles[i].use & HANDLE_USED)
 			handle_log_close(i, "forced");
 }
 
@@ -2532,10 +2537,10 @@ process_opendir(uint32_t id)
         if (path_len == 0 || (path_len == 2 && isalpha(path[0]) && path[1] == ':'))
                 path = xstrcat(path, "./", &path_len);
         else if (path[path_len - 1] == '/' || path[path_len - 1] == '\\')
-                path = xstrcat(path, "/", &path_len);
-        else
                 path = xcopy(path, path_len + 1);
-        
+        else
+                path = xstrcat(path, "/", &path_len);
+
         pattern = xstrcat(xcopy(path, path_len + 1), "*", &path_len);
 
         dd = FindFirstFile(pattern, &find_data);
@@ -2765,7 +2770,7 @@ static void
 process_readdir(uint32_t id)
 {
         // TODO: Fix memory leaks!
-        
+
         HANDLE dd;
 	struct dirent *dp;
 	char *path;
@@ -2781,7 +2786,7 @@ process_readdir(uint32_t id)
 	if (dd == INVALID_HANDLE_VALUE || path == NULL) {
 		send_status(id, SSH2_FX_FAILURE);
 	} else {
-                char *fn = handle_delete_dir_start(handle);
+                char *fn = handle_dir_start_and_reset(handle);
                 if (!fn) {
                         WIN32_FIND_DATA find_data;
                         if (FindNextFile(dd, &find_data))
@@ -2797,6 +2802,7 @@ process_readdir(uint32_t id)
                         stats.long_name = xpathcat(path, fn);
                         w_stat(stats.long_name, &(stats.attrib));
                         send_names(id, 1, &stats);
+			free(fn);
                 }
                 else
                         send_status(id, SSH2_FX_EOF);
