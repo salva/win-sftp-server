@@ -3130,7 +3130,6 @@ sftp_server_main(int argc, char **argv)
 	int i, r, ch, skipargs = 0, log_stderr = 0;
 	ssize_t set_size;
 	char *cp, *homedir = NULL, buf[4*4096];
-	long mask;
 
 	HANDLE in, out;
 
@@ -3194,14 +3193,6 @@ sftp_server_main(int argc, char **argv)
 			if (request_blacklist != NULL)
 				fatal("Refused requests already set");
 			request_blacklist = xstrdup(optarg);
-			break;
-		case 'u':
-			errno = 0;
-			mask = strtol(optarg, &cp, 8);
-			if (mask < 0 || mask > 0777 || *cp != '\0' ||
-			    cp == optarg || (mask == 0 && errno != 0))
-				fatal("Invalid umask \"%s\"", optarg);
-			(void)umask((mode_t)mask);
 			break;
 		case 'h':
 		default:
