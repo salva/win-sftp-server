@@ -269,32 +269,6 @@ strlcat(char *dst, const char *src, size_t siz)
 	return(dlen + (s - src));	/* count does not include NUL */
 }
 
-static size_t
-strlcpy(char *dst, const char *src, size_t siz)
-{
-	char *d = dst;
-	const char *s = src;
-	size_t n = siz;
-
-	/* Copy as many bytes as will fit */
-	if (n != 0) {
-		while (--n != 0) {
-			if ((*d++ = *s++) == '\0')
-				break;
-		}
-	}
-
-	/* Not enough room in dst, add NUL and traverse rest of src */
-	if (n == 0) {
-		if (siz != 0)
-			*d = '\0';		/* NUL-terminate dst */
-		while (*s++)
-			;
-	}
-
-	return(s - src - 1);	/* count does not include NUL */
-}
-
 #define S_ISUID 2048
 #define S_ISGID 1024
 #define S_ISVTX 512
@@ -376,8 +350,8 @@ win_attrib_to_str(DWORD attrib, char *p)
 /* 	fatal("vasprintf: out of memory"); */
 /* } */
 
-#define tell_error(msg) verbose("%s: %d at %s", (msg), GetLastError(), __func__)
-#define fatal_error(msg) fatal("%s: %d at %s", (msg), GetLastError(), __func__)
+#define tell_error(msg) verbose("%s: %lu at %s", (msg), GetLastError(), __func__)
+#define fatal_error(msg) fatal("%s: %lu at %s", (msg), GetLastError(), __func__)
 
 static void *
 xmalloc(size_t size)
@@ -471,7 +445,7 @@ xreallocarray(void *ptr, size_t nmemb, size_t size)
 	    nmemb == 0 || SIZE_MAX / nmemb > size)
 		return xrealloc(ptr, size * nmemb);
 
-	fatal("xreallocarray: arguments out of limits, %zu elements of %zu bytes",
+	fatal("xreallocarray: arguments out of limits, %u elements of %u bytes",
 	      nmemb, size);
 }
 
@@ -712,25 +686,6 @@ debug2(const char *fmt,...)
 		((uint8_t *)(p))[1] = __v & 0xff; \
 	} while (0)
 
-
-static uint64_t
-get_u64(const void *vp)
-{
-	const uint8_t *p = (const uint8_t *)vp;
-	uint64_t v;
-
-	v  = (uint64_t)p[0] << 56;
-	v |= (uint64_t)p[1] << 48;
-	v |= (uint64_t)p[2] << 40;
-	v |= (uint64_t)p[3] << 32;
-	v |= (uint64_t)p[4] << 24;
-	v |= (uint64_t)p[5] << 16;
-	v |= (uint64_t)p[6] << 8;
-	v |= (uint64_t)p[7];
-
-	return (v);
-}
-
 static uint32_t
 get_u32(const void *vp)
 {
@@ -745,47 +700,6 @@ get_u32(const void *vp)
 	return (v);
 }
 
-static uint32_t
-get_u32_le(const void *vp)
-{
-	const uint8_t *p = (const uint8_t *)vp;
-	uint32_t v;
-
-	v  = (uint32_t)p[0];
-	v |= (uint32_t)p[1] << 8;
-	v |= (uint32_t)p[2] << 16;
-	v |= (uint32_t)p[3] << 24;
-
-	return (v);
-}
-
-static uint16_t
-get_u16(const void *vp)
-{
-	const uint8_t *p = (const uint8_t *)vp;
-	uint16_t v;
-
-	v  = (uint16_t)p[0] << 8;
-	v |= (uint16_t)p[1];
-
-	return (v);
-}
-
-static void
-put_u64(void *vp, uint64_t v)
-{
-	uint8_t *p = (uint8_t *)vp;
-
-	p[0] = (uint8_t)(v >> 56) & 0xff;
-	p[1] = (uint8_t)(v >> 48) & 0xff;
-	p[2] = (uint8_t)(v >> 40) & 0xff;
-	p[3] = (uint8_t)(v >> 32) & 0xff;
-	p[4] = (uint8_t)(v >> 24) & 0xff;
-	p[5] = (uint8_t)(v >> 16) & 0xff;
-	p[6] = (uint8_t)(v >> 8) & 0xff;
-	p[7] = (uint8_t)v & 0xff;
-}
-
 static void
 put_u32(void *vp, uint32_t v)
 {
@@ -795,26 +709,6 @@ put_u32(void *vp, uint32_t v)
 	p[1] = (uint8_t)(v >> 16) & 0xff;
 	p[2] = (uint8_t)(v >> 8) & 0xff;
 	p[3] = (uint8_t)v & 0xff;
-}
-
-static void
-put_u32_le(void *vp, uint32_t v)
-{
-	uint8_t *p = (uint8_t *)vp;
-
-	p[0] = (uint8_t)v & 0xff;
-	p[1] = (uint8_t)(v >> 8) & 0xff;
-	p[2] = (uint8_t)(v >> 16) & 0xff;
-	p[3] = (uint8_t)(v >> 24) & 0xff;
-}
-
-static void
-put_u16(void *vp, uint16_t v)
-{
-	uint8_t *p = (uint8_t *)vp;
-
-	p[0] = (uint8_t)(v >> 8) & 0xff;
-	p[1] = (uint8_t)v & 0xff;
 }
 
 static int
@@ -1131,19 +1025,6 @@ sshbuf_get_u32(struct sshbuf *buf, uint32_t *valp)
 }
 
 static int
-sshbuf_get_u16(struct sshbuf *buf, uint16_t *valp)
-{
-	const uint8_t *p = sshbuf_ptr(buf);
-	int r;
-
-	if ((r = sshbuf_consume(buf, 2)) < 0)
-		return r;
-	if (valp != NULL)
-		*valp = PEEK_U16(p);
-	return 0;
-}
-
-static int
 sshbuf_get_u8(struct sshbuf *buf, uint8_t *valp)
 {
 	const uint8_t *p = sshbuf_ptr(buf);
@@ -1156,7 +1037,7 @@ sshbuf_get_u8(struct sshbuf *buf, uint8_t *valp)
 	return 0;
 }
 
-static int
+ int
 sshbuf_get_stringb(struct sshbuf *buf, struct sshbuf *v)
 {
 	uint32_t len;
@@ -1197,18 +1078,6 @@ sshbuf_put_u32(struct sshbuf *buf, uint32_t val)
 	if ((r = sshbuf_reserve(buf, 4, &p)) < 0)
 		return r;
 	POKE_U32(p, val);
-	return 0;
-}
-
-static int
-sshbuf_put_u16(struct sshbuf *buf, uint16_t val)
-{
-	uint8_t *p;
-	int r;
-
-	if ((r = sshbuf_reserve(buf, 2, &p)) < 0)
-		return r;
-	POKE_U16(p, val);
 	return 0;
 }
 
@@ -1460,14 +1329,6 @@ w_chown(char *name, uid_t uid, gid_t gid)
 {
 	// TODO: implement me!
 	error("w_chown(%s, %d, %d) <- unimplemented", name, uid, gid);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_lstat(char *name, Attrib *attrib) {
-	// TODO: implement me!
-	error("w_lstat(%s, ...) <- unimplemented", name);
 	SetLastError(ERROR_NOT_SUPPORTED);
 	return -1;
 }
@@ -1769,16 +1630,6 @@ handle_log_close(int handle, char *emsg)
 		    emsg == NULL ? "" : emsg, emsg == NULL ? "" : " ",
 		    handle_to_name(handle));
 	}
-}
-
-static void
-handle_log_exit(void)
-{
-	uint i;
-
-	for (i = 0; i < num_handles; i++)
-		if (handles[i].use & HANDLE_USED)
-			handle_log_close(i, "forced");
 }
 
 static int
@@ -2085,7 +1936,6 @@ process_open(uint32_t id)
 			}
 		}
 	}
-cleanup:
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
 	xfree(name);
@@ -2111,12 +1961,12 @@ process_read(uint32_t id)
 {
 	uint8_t buf[64*1024];
 	uint32_t len;
-	int r, handle, ret, status = SSH2_FX_FAILURE;
+	int r, handle, status = SSH2_FX_FAILURE;
 	HANDLE fd;
 	LARGE_INTEGER off;
 
 	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = sshbuf_get_u64(iqueue, &(off.QuadPart))) != 0 ||
+	    (r = sshbuf_get_u64(iqueue, (uint64_t*)&(off.QuadPart))) != 0 ||
             (r = sshbuf_get_u32(iqueue, &len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
@@ -2165,12 +2015,12 @@ process_write(uint32_t id)
 {
 	LARGE_INTEGER off;
 	size_t len;
-	int r, handle, ret, status = SSH2_FX_FAILURE;
+	int r, handle, status = SSH2_FX_FAILURE;
         HANDLE fd;
 	uint8_t *data;
 
 	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = sshbuf_get_u64(iqueue, &(off.QuadPart))) != 0 ||
+	    (r = sshbuf_get_u64(iqueue, (uint64_t*)&(off.QuadPart))) != 0 ||
 	    (r = sshbuf_get_string(iqueue, &data, &len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
@@ -2513,23 +2363,22 @@ process_opendir(uint32_t id)
 /* 	return (cp->name); */
 /* } */
 
-static char *
+ char *
 user_from_uid(uid_t uid, int nouser) {
 	return "paco";
 }
 
-static char *
+ char *
 group_from_gid(gid_t gid, int nogroup) {
 	return "carambolas";
 }
 
-static char *
+ char *
 ls_file(const char *name, BY_HANDLE_FILE_INFORMATION *info, int remote)
 {
-	int ulen, glen, sz = 0;
+	int ulen, glen;
 	char *user, *group;
-	char buf[1024], mode[11+1], tbuf[12+1], ubuf[11+1], gbuf[11+1];
-	time_t now;
+	char buf[1024], mode[11+1], tbuf[12+1];
 
 	win_attrib_to_str(info->dwFileAttributes, mode);
 	/* TODO: fixme! */
@@ -2564,7 +2413,6 @@ process_readdir(uint32_t id)
         // TODO: Fix memory leaks!
 
         HANDLE dd;
-	struct dirent *dp;
 	char *path;
 	int r, handle;
 
@@ -2697,7 +2545,6 @@ process_rename(uint32_t id)
 {
 	char *oldpath, *newpath;
 	int r, status;
-	DWORD attrib;
 
 	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
 	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
@@ -3065,7 +2912,7 @@ tilde_expand_filename(const char *filename)
 	return xstrdup(filename);
 }
 
-static char *
+ char *
 percent_expand(const char *string, ...)
 {
 #define EXPAND_MAX_KEYS	16
@@ -3126,17 +2973,12 @@ percent_expand(const char *string, ...)
 int
 sftp_server_main(int argc, char **argv)
 {
-	fd_set *rset, *wset;
-	int i, r, ch, skipargs = 0, log_stderr = 0;
-	ssize_t set_size;
+	int i, r, ch, skipargs = 0;
 	char *cp, *homedir = NULL, buf[4*4096];
 
 	HANDLE in, out;
 
 	extern char *optarg;
-	extern char *__progname;
-
-	// __progname = ssh_get_progname(argv[0]);
 
 	pw = pwinit();
 
@@ -3165,7 +3007,7 @@ sftp_server_main(int argc, char **argv)
 			skipargs = 1;
 			break;
 		case 'e':
-			log_stderr = 1;
+			// log_stderr = 1;
 			break;
 		case 'l':
 			log_level = log_level_number(optarg);
@@ -3231,7 +3073,7 @@ sftp_server_main(int argc, char **argv)
 
 	if (homedir != NULL) {
 		if (chdir(homedir) != 0) {
-			fatal("chdir to \"%s\" failed: %d", GetLastError());
+			fatal("chdir to \"%s\" failed: %lu", homedir, GetLastError());
 		}
 	}
 	for (;;) {
@@ -3247,7 +3089,7 @@ sftp_server_main(int argc, char **argv)
 				continue;
 			}
 			else
-				fatal("%s: WriteFile failed: %d", __func__, GetLastError());
+				fatal("%s: WriteFile failed: %lu", __func__, GetLastError());
 		}
 
 		if ((r = sshbuf_check_reserve(iqueue, sizeof(buf))) != 0)
@@ -3264,7 +3106,7 @@ sftp_server_main(int argc, char **argv)
 			}
 		}
 		else
-			fatal("%s: ReadFile failed: %d", __func__, GetLastError());
+			fatal("%s: ReadFile failed: %lu", __func__, GetLastError());
 	}
 }
 
