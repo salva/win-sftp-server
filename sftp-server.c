@@ -17,26 +17,13 @@
 
 #include <windows.h>
 
-#define _GNU_SOURCE
-
-#include <sys/stat.h>
-#include <sys/time.h>
-
-#include <dirent.h>
-//#include <errno.h>
 #include <fcntl.h>
-//#include <pwd.h>
-#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdint.h>
-//#include <grp.h>
-#include <ctype.h>
-
-//#include <bsd/string.h>
 
 #define	SSH2_FILEXFER_VERSION		3
 
@@ -322,110 +309,29 @@ strlcpy(char *dst, const char *src, size_t siz)
 //#define S_IXOTH 1
 
 void
-strmode(int mode, char *p)
+win_attrib_to_str(DWORD attrib, char *p)
 {
-	 /* print type */
-	switch (mode & S_IFMT) {
-	case S_IFDIR:			/* directory */
+	int is_dir = 0;
+
+	if (attrib & FILE_ATTRIBUTE_DIRECTORY) {
 		*p++ = 'd';
-		break;
-	case S_IFCHR:			/* character special */
-		*p++ = 'c';
-		break;
-	case S_IFBLK:			/* block special */
-		*p++ = 'b';
-		break;
-	case S_IFREG:			/* regular */
+		is_dir = 1;
+	}
+	else if (attrib & FILE_ATTRIBUTE_NORMAL)
 		*p++ = '-';
-		break;
-	/* case S_IFLNK:			/\* symbolic link *\/ */
-	/* 	*p++ = 'l'; */
-	/* 	break; */
-#ifdef S_IFSOCK
-	case S_IFSOCK:			/* socket */
-		*p++ = 's';
-		break;
-#endif
-#ifdef S_IFIFO
-	case S_IFIFO:			/* fifo */
-		*p++ = 'p';
-		break;
-#endif
-	default:			/* unknown */
+	else
 		*p++ = '?';
-		break;
-	}
-	/* usr */
-	if (mode & S_IRUSR)
-		*p++ = 'r';
-	else
-		*p++ = '-';
-	if (mode & S_IWUSR)
-		*p++ = 'w';
-	else
-		*p++ = '-';
-	switch (mode & (S_IXUSR | S_ISUID)) {
-	case 0:
-		*p++ = '-';
-		break;
-	case S_IXUSR:
+
+	if (is_dir)
 		*p++ = 'x';
-		break;
-	case S_ISUID:
-		*p++ = 'S';
-		break;
-	case S_IXUSR | S_ISUID:
-		*p++ = 's';
-		break;
-	}
-	/* group */
-	if (mode & S_IRGRP)
-		*p++ = 'r';
 	else
 		*p++ = '-';
-	if (mode & S_IWGRP)
-		*p++ = 'w';
-	else
-		*p++ = '-';
-	switch (mode & (S_IXGRP | S_ISGID)) {
-	case 0:
-		*p++ = '-';
-		break;
-	case S_IXGRP:
-		*p++ = 'x';
-		break;
-	case S_ISGID:
-		*p++ = 'S';
-		break;
-	case S_IXGRP | S_ISGID:
-		*p++ = 's';
-		break;
-	}
-	/* other */
-	if (mode & S_IROTH)
-		*p++ = 'r';
-	else
-		*p++ = '-';
-	if (mode & S_IWOTH)
-		*p++ = 'w';
-	else
-		*p++ = '-';
-	switch (mode & (S_IXOTH | S_ISVTX)) {
-	case 0:
-		*p++ = '-';
-		break;
-	case S_IXOTH:
-		*p++ = 'x';
-		break;
-	case S_ISVTX:
-		*p++ = 'T';
-		break;
-	case S_IXOTH | S_ISVTX:
-		*p++ = 't';
-		break;
-	}
-	*p++ = ' ';		/* will be a '+' if ACL's implemented */
-	*p = '\0';
+
+	*p++ = 'r';
+	*p++ = 'w';
+	memset(p, 6, '-');
+	p[6] = ' ';
+	p[7] = 0;
 }
 
 /* static int */
@@ -522,21 +428,21 @@ xcopy(const void *data, size_t size) {
         return copy;
 }
 
-static int
-xasprintf(char **ret, const char *fmt, ...)
-{
-	va_list ap;
-	int i;
+/* static int */
+/* xasprintf(char **ret, const char *fmt, ...) */
+/* { */
+/* 	va_list ap; */
+/* 	int i; */
 
-	va_start(ap, fmt);
-	i = vasprintf(ret, fmt, ap);
-	va_end(ap);
+/* 	va_start(ap, fmt); */
+/* 	i = vasprintf(ret, fmt, ap); */
+/* 	va_end(ap); */
 
-	if (i < 0 || *ret == NULL)
-		fatal("xasprintf: could not allocate memory");
+/* 	if (i < 0 || *ret == NULL) */
+/* 		fatal("xasprintf: could not allocate memory"); */
 
-	return (i);
-}
+/* 	return (i); */
+/* } */
 
 
 #define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
@@ -1578,7 +1484,7 @@ w_chown(char *name, uid_t uid, gid_t gid)
 }
 
 static int
-w_lstat(char *name, struct stat *st) {
+w_lstat(char *name, Attrib *attrib) {
 	// TODO: implement me!
 	error("w_lstat(%s, ...) <- unimplemented", name);
 	SetLastError(ERROR_NOT_SUPPORTED);
@@ -1608,11 +1514,16 @@ win_attrib_to_posix_mode(DWORD attrib) {
         return mode;
 }
 
+static int64_t
+file_info_to_size(BY_HANDLE_FILE_INFORMATION *info) {
+	return ((((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow);
+}
+
 static void
 file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a) {
 	attrib_clear(a);
         a->flags |= SSH2_FILEXFER_ATTR_SIZE;
-        a->size = (((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow;
+        a->size = file_info_to_size(info);
         a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
         a->perm = win_attrib_to_posix_mode(info->dwFileAttributes);
         a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
@@ -2023,23 +1934,6 @@ encode_attrib(struct sshbuf *b, const Attrib *a)
 	return 0;
 }
 
-static void
-stat_to_attrib(const struct stat *st, Attrib *a)
-{
-	attrib_clear(a);
-	a->flags = 0;
-	a->flags |= SSH2_FILEXFER_ATTR_SIZE;
-	a->size = st->st_size;
-	a->flags |= SSH2_FILEXFER_ATTR_UIDGID;
-	a->uid = st->st_uid;
-	a->gid = st->st_gid;
-	a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
-	a->perm = st->st_mode;
-	a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
-	a->atime = st->st_atime;
-	a->mtime = st->st_mtime;
-}
-
 static int
 decode_attrib(struct sshbuf *b, Attrib *a)
 {
@@ -2224,7 +2118,7 @@ process_close(uint32_t id)
 	if ((r = get_handle(iqueue, &handle)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
-	debug3("request %u: close handle %u", id, handle);
+	debug3("request %u: close handle %d", id, handle);
 	handle_log_close(handle, NULL);
 	ret = handle_close(handle);
 	status = (ret == -1) ? last_error_to_portable() : SSH2_FX_OK;
@@ -2345,7 +2239,6 @@ static void
 process_do_stat(uint32_t id, int do_lstat)
 {
 	Attrib a;
-	struct stat st;
 	char *name;
 	int r, status = SSH2_FX_FAILURE;
 
@@ -2357,17 +2250,16 @@ process_do_stat(uint32_t id, int do_lstat)
 
 	// TODO: add lstat back
 	// r = do_lstat ? lstat(name, &st) : stat(name, &st);
-	r = stat(name, &st);
-
-	if (r < 0) {
-		status = last_error_to_portable();
-	} else {
-		stat_to_attrib(&st, &a);
+	if (w_hstat(name, &a)) {
 		send_attrib(id, &a);
 		status = SSH2_FX_OK;
 	}
+	else
+		status = last_error_to_portable();
+
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
+	
 	free(name);
 }
 
@@ -2423,8 +2315,16 @@ process_setstat(uint32_t id)
 	if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
 		logit("set \"%s\" size %llu",
 		    name, (unsigned long long)a.size);
-		r = truncate(name, a.size);
-		if (r == -1)
+		HANDLE fd = CreateFile(name, GENERIC_WRITE, 0,
+			   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (fd != INVALID_HANDLE_VALUE) {
+			LARGE_INTEGER off;
+			off.QuadPart = a.size;
+			if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) || 
+			    !SetEndOfFile(fd))
+				status = last_error_to_portable();
+		}
+		else
 			status = last_error_to_portable();
 	}
 	if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
@@ -2564,82 +2464,6 @@ process_opendir(uint32_t id)
         free(pattern);
 }
 
-#define	FMT_SCALED_STRSIZE	7
-typedef enum { NONE = 0, KILO = 1, MEGA = 2, GIGA = 3, TERA = 4, PETA = 5, EXA = 6 } unit_type;
-
-static unit_type scale_units[] = { NONE, KILO, MEGA, GIGA, TERA, PETA, EXA };
-static char scale_chars[] = "BKMGTPE";
-static long long scale_factors[] = {
-	1LL,
-	1024LL,
-	1024LL*1024,
-	1024LL*1024*1024,
-	1024LL*1024*1024*1024,
-	1024LL*1024*1024*1024*1024,
-	1024LL*1024*1024*1024*1024*1024,
-};
-#define	SCALE_LENGTH (sizeof(scale_units)/sizeof(scale_units[0]))
-
-#define MAX_DIGITS (SCALE_LENGTH * 3)	/* XXX strlen(sprintf("%lld", -1)? */
-
-
-static int
-fmt_scaled(long long number, char *result)
-{
-	long long abval, fract = 0;
-	unsigned int i;
-	unit_type unit = NONE;
-
-	abval = (number < 0LL) ? -number : number;	/* no long long_abs yet */
-
-	/* Not every negative long long has a positive representation.
-	 * Also check for numbers that are just too darned big to format
-	 */
-	if (abval < 0 || abval / 1024 >= scale_factors[SCALE_LENGTH-1]) {
-		SetLastError(ERROR_BUFFER_OVERFLOW);
-		return -1;
-	}
-
-	/* scale whole part; get unscaled fraction */
-	for (i = 0; i < SCALE_LENGTH; i++) {
-		if (abval/1024 < scale_factors[i]) {
-			unit = scale_units[i];
-			fract = (i == 0) ? 0 : abval % scale_factors[i];
-			number /= scale_factors[i];
-			if (i > 0)
-				fract /= scale_factors[i - 1];
-			break;
-		}
-	}
-
-	fract = (10 * fract + 512) / 1024;
-	/* if the result would be >= 10, round main number */
-	if (fract == 10) {
-		if (number >= 0)
-			number++;
-		else
-			number--;
-		fract = 0;
-	}
-
-	if (number == 0)
-		strlcpy(result, "0B", FMT_SCALED_STRSIZE);
-	else if (unit == NONE || number >= 100 || number <= -100) {
-		if (fract >= 5) {
-			if (number >= 0)
-				number++;
-			else
-				number--;
-		}
-		(void)snprintf(result, FMT_SCALED_STRSIZE, "%lld%c",
-			number, scale_chars[unit]);
-	} else
-		(void)snprintf(result, FMT_SCALED_STRSIZE, "%lld.%1lld%c",
-			number, fract, scale_chars[unit]);
-
-	return 0;
-}
-
 /* #define	NCACHE	64			/\* power of 2 *\/ */
 /* #define	MASK	(NCACHE - 1)		/\* bits to store with *\/ */
 /* static char * */
@@ -2719,50 +2543,37 @@ group_from_gid(gid_t gid, int nogroup) {
 }
 
 static char *
-ls_file(const char *name, const struct stat *st, int remote, int si_units)
+ls_file(const char *name, BY_HANDLE_FILE_INFORMATION *info, int remote)
 {
 	int ulen, glen, sz = 0;
-	struct tm *ltime = localtime(&st->st_mtime);
 	char *user, *group;
 	char buf[1024], mode[11+1], tbuf[12+1], ubuf[11+1], gbuf[11+1];
-	char sbuf[FMT_SCALED_STRSIZE];
 	time_t now;
 
-	strmode(st->st_mode, mode);
-	if (!remote) {
-		user = user_from_uid(st->st_uid, 0);
-	} else {
-		snprintf(ubuf, sizeof ubuf, "%u", (uint)st->st_uid);
-		user = ubuf;
-	}
-	if (!remote) {
-		group = group_from_gid(st->st_gid, 0);
-	} else {
-		snprintf(gbuf, sizeof gbuf, "%u", (uint)st->st_gid);
-		group = gbuf;
-	}
-	if (ltime != NULL) {
-		now = time(NULL);
-		if (now - (365*24*60*60)/2 < st->st_mtime &&
-		    now >= st->st_mtime)
-			sz = strftime(tbuf, sizeof tbuf, "%b %e %H:%M", ltime);
-		else
-			sz = strftime(tbuf, sizeof tbuf, "%b %e  %Y", ltime);
-	}
-	if (sz == 0)
-		tbuf[0] = '\0';
+	win_attrib_to_str(info->dwFileAttributes, mode);
+	/* TODO: fixme! */
+	/* user = user_from_uid(st->st_uid, 0); */
+	user = "paco";
+	/* group = group_from_gid(st->st_gid, 0); */
+	group = "carambolas";
+
+	/* TODO: generate timestamp from info */
+	/* now = time(NULL); */
+	/* if (now - (365*24*60*60)/2 < st->st_mtime && */
+	/*     now >= st->st_mtime) */
+	/* 	sz = strftime(tbuf, sizeof tbuf, "%b %e %H:%M", ltime); */
+	/* else */
+	/* 	sz = strftime(tbuf, sizeof tbuf, "%b %e  %Y", ltime); */
+	strcpy(tbuf, "Once upon a time");
+
 	ulen = MAXIMUM(strlen(user), 8);
 	glen = MAXIMUM(strlen(group), 8);
-	if (si_units) {
-		fmt_scaled((long long)st->st_size, sbuf);
-		snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8s %s %s", mode,
-		    (uint)st->st_nlink, ulen, user, glen, group,
-		    sbuf, tbuf, name);
-	} else {
-		snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8llu %s %s", mode,
-		    (uint)st->st_nlink, ulen, user, glen, group,
-		    (unsigned long long)st->st_size, tbuf, name);
-	}
+
+	/* TODO: Fix link number */
+	snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8llu %s %s", mode,
+		 (uint)1, ulen, user, glen, group,
+		 file_info_to_size(info), tbuf, name);
+
 	return xstrdup(buf);
 }
 
@@ -2905,7 +2716,7 @@ process_rename(uint32_t id)
 {
 	char *oldpath, *newpath;
 	int r, status;
-	struct stat sb;
+	DWORD attrib;
 
 	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
 	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
@@ -2914,48 +2725,13 @@ process_rename(uint32_t id)
 	debug3("request %u: rename", id);
 	logit("rename old \"%s\" new \"%s\"", oldpath, newpath);
 	status = SSH2_FX_FAILURE;
-	if (w_lstat(oldpath, &sb) == -1)
-		status = last_error_to_portable();
-	else if (S_ISREG(sb.st_mode)) {
-		/* Race-free rename of regular files */
-		if (w_link(oldpath, newpath) == -1) {
-/* 			if (errno == EOPNOTSUPP || errno == ENOSYS */
-/* #ifdef EXDEV */
-/* 			    || errno == EXDEV */
-/* #endif */
-/* #ifdef LINK_OPNOTSUPP_ERRNO */
-/* 			    || errno == LINK_OPNOTSUPP_ERRNO */
-/* #endif */
-/* 			    ) { */
-			if (1) { // fallback unconditionally, TODO: remove me!
-				struct stat st;
 
-				/*
-				 * fs doesn't support links, so fall back to
-				 * stat+rename.  This is racy.
-				 */
-				if (stat(newpath, &st) == -1) {
-					if (rename(oldpath, newpath) == -1)
-						status =
-						    last_error_to_portable();
-					else
-						status = SSH2_FX_OK;
-				}
-			} else {
-				status = last_error_to_portable();
-			}
-		} else if (unlink(oldpath) == -1) {
-			status = last_error_to_portable();
-			/* clean spare link */
-			unlink(newpath);
-		} else
-			status = SSH2_FX_OK;
-	} else if (stat(newpath, &sb) == -1) {
-		if (rename(oldpath, newpath) == -1)
-			status = last_error_to_portable();
-		else
-			status = SSH2_FX_OK;
+	if (MoveFile(oldpath, newpath))
+		status = SSH2_FX_OK;
+	else {
+		status = last_error_to_portable();
 	}
+
 	send_status(id, status);
 	free(oldpath);
 	free(newpath);
