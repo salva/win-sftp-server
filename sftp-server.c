@@ -17,7 +17,6 @@
 
 #include <windows.h>
 
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -96,15 +95,15 @@
 #define SSH_ERR_BUFFER_READ_ONLY		-49
 
 typedef enum {
-	SYSLOG_LEVEL_QUIET,
-	SYSLOG_LEVEL_FATAL,
-	SYSLOG_LEVEL_ERROR,
-	SYSLOG_LEVEL_INFO,
-	SYSLOG_LEVEL_VERBOSE,
-	SYSLOG_LEVEL_DEBUG1,
-	SYSLOG_LEVEL_DEBUG2,
-	SYSLOG_LEVEL_DEBUG3,
-	SYSLOG_LEVEL_NOT_SET = -1
+	LOG_LEVEL_QUIET,
+	LOG_LEVEL_FATAL,
+	LOG_LEVEL_ERROR,
+	LOG_LEVEL_INFO,
+	LOG_LEVEL_VERBOSE,
+	LOG_LEVEL_DEBUG1,
+	LOG_LEVEL_DEBUG2,
+	LOG_LEVEL_DEBUG3,
+	LOG_LEVEL_NOT_SET = -1
 }       LogLevel;
 
 typedef unsigned int uint;
@@ -120,9 +119,6 @@ typedef struct {
 } Attrib;
 
 #define SSHBUF_SIZE_MAX		0x8000000	/* Hard maximum size */
-#define SSHBUF_REFS_MAX		0x100000	/* Max child buffers */
-#define SSHBUF_MAX_BIGNUM	(16384 / 8)	/* Max bignum *bytes* */
-#define SSHBUF_MAX_ECPOINT	((528 * 2 / 8) + 1) /* Max EC point *bytes* */
 
 struct sshbuf {
 	uint8_t *d;		/* Data */
@@ -133,7 +129,7 @@ struct sshbuf {
 };
 
 /* Our verbosity */
-static LogLevel log_level = 0; //SYSLOG_LEVEL_ERROR;
+static LogLevel log_level = 0; //LOG_LEVEL_ERROR;
 
 /* Our client */
 struct passwd {
@@ -233,9 +229,10 @@ struct sftp_handler extended_handlers[] = {
 };
 
 static void fatal(const char *, ...) __attribute__((noreturn)) __attribute__((format(printf, 1, 2)));
-static void cleanup_exit(int) __attribute__((noreturn));
-
+static void verbose(const char *fmt, ...);
 static void do_log(LogLevel level, const char *fmt, va_list args);
+
+static void cleanup_exit(int) __attribute__((noreturn));
 
 #define MINIMUM(a, b) (((a) < (b)) ? (a) : (b))
 #define MAXIMUM(a, b) (((a) > (b)) ? (a) : (b))
@@ -351,12 +348,12 @@ win_attrib_to_str(DWORD attrib, char *p)
 /* 	if (ret >= 0 && ret < INIT_SZ) { /\* succeeded with initial alloc *\/ */
 /* 		*str = string; */
 /* 	} else if (ret == INT_MAX || ret < 0) { /\* Bad length *\/ */
-/* 		free(string); */
+/* 		xfree(string); */
 /* 		goto fail; */
 /* 	} else {	/\* bigger than initial, realloc allowing for nul *\/ */
 /* 		len = (size_t)ret + 1; */
 /* 		if ((newstr = realloc(string, len)) == NULL) { */
-/* 			free(string); */
+/* 			xfree(string); */
 /* 			goto fail; */
 /* 		} else { */
 /* 			va_end(ap2); */
@@ -365,7 +362,7 @@ win_attrib_to_str(DWORD attrib, char *p)
 /* 			if (ret >= 0 && (size_t)ret < len) { */
 /* 				*str = newstr; */
 /* 			} else { /\* failed with realloc'ed string, give up *\/ */
-/* 				free(newstr); */
+/* 				xfree(newstr); */
 /* 				goto fail; */
 /* 			} */
 /* 		} */
@@ -379,6 +376,9 @@ win_attrib_to_str(DWORD attrib, char *p)
 /* 	fatal("vasprintf: out of memory"); */
 /* } */
 
+#define tell_error(msg) verbose("%s: %d at %s", (msg), GetLastError(), __func__)
+#define fatal_error(msg) fatal("%s: %d at %s", (msg), GetLastError(), __func__)
+
 static void *
 xmalloc(size_t size)
 {
@@ -386,10 +386,16 @@ xmalloc(size_t size)
 
 	if (size == 0)
 		fatal("xmalloc: zero size");
-	ptr = malloc(size);
+	ptr = HeapAlloc(GetProcessHeap(), 0, size);
 	if (ptr == NULL)
-		fatal("xmalloc: out of memory (allocating %zu bytes)", size);
+		fatal_error("HeapAlloc failed");
 	return ptr;
+}
+
+static void
+xfree(void *ptr) {
+	if (!HeapFree(GetProcessHeap(), 0, ptr))
+		fatal_error("HeapFree failed");
 }
 
 static void *
@@ -401,10 +407,9 @@ xcalloc(size_t nmemb, size_t size)
 		fatal("xcalloc: zero size");
 	if (SIZE_MAX / nmemb < size)
 		fatal("xcalloc: nmemb * size > SIZE_MAX");
-	ptr = calloc(nmemb, size);
+	ptr = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, nmemb * size);
 	if (ptr == NULL)
-		fatal("xcalloc: out of memory (allocating %zu bytes)",
-		    size * nmemb);
+		fatal_error("HeapAlloc failed");
 	return ptr;
 }
 
@@ -448,18 +453,25 @@ xcopy(const void *data, size_t size) {
 #define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
 
 static void *
+xrealloc(void *ptr, size_t size) {
+	void *new_ptr = (ptr
+			 ? HeapReAlloc(GetProcessHeap(), 0, ptr, size)
+			 : HeapAlloc(GetProcessHeap(), 0, size));
+	if (new_ptr == NULL)
+		fatal_error("HeapReAlloc/HeapAlloc failed");
+	return new_ptr;
+}
+
+static void *
 xreallocarray(void *ptr, size_t nmemb, size_t size)
 {
-	void *new_ptr;
+
 
 	if ((nmemb < MUL_NO_OVERFLOW && size < MUL_NO_OVERFLOW) ||
-	    nmemb == 0 || SIZE_MAX / nmemb > size) {
-		new_ptr = realloc(ptr, size * nmemb);
-		if (new_ptr)
-			return new_ptr;
-	}
+	    nmemb == 0 || SIZE_MAX / nmemb > size)
+		return xrealloc(ptr, size * nmemb);
 
-	fatal("xreallocarray: out of memory (%zu elements of %zu bytes)",
+	fatal("xreallocarray: arguments out of limits, %zu elements of %zu bytes",
 	      nmemb, size);
 }
 
@@ -503,7 +515,7 @@ fatal(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_FATAL, fmt, args);
+	do_log(LOG_LEVEL_FATAL, fmt, args);
 	va_end(args);
 	cleanup_exit(255);
 }
@@ -518,24 +530,24 @@ do_log(LogLevel level, const char *fmt, va_list args)
 		; //return;
 
 	switch (level) {
-	case SYSLOG_LEVEL_FATAL:
+	case LOG_LEVEL_FATAL:
 		txt = "fatal";
 		break;
-	case SYSLOG_LEVEL_ERROR:
+	case LOG_LEVEL_ERROR:
 		txt = "error";
 		break;
-	case SYSLOG_LEVEL_INFO:
+	case LOG_LEVEL_INFO:
 		txt = "info";
 		break;
-	case SYSLOG_LEVEL_VERBOSE:
+	case LOG_LEVEL_VERBOSE:
 		break;
-	case SYSLOG_LEVEL_DEBUG1:
+	case LOG_LEVEL_DEBUG1:
 		txt = "debug1";
 		break;
-	case SYSLOG_LEVEL_DEBUG2:
+	case LOG_LEVEL_DEBUG2:
 		txt = "debug2";
 		break;
-	case SYSLOG_LEVEL_DEBUG3:
+	case LOG_LEVEL_DEBUG3:
 		txt = "debug3";
 		break;
 	default:
@@ -556,7 +568,7 @@ verbose(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_VERBOSE, fmt, args);
+	do_log(LOG_LEVEL_VERBOSE, fmt, args);
 	va_end(args);
 }
 
@@ -566,7 +578,7 @@ logit(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_INFO, fmt, args);
+	do_log(LOG_LEVEL_INFO, fmt, args);
 	va_end(args);
 }
 
@@ -576,7 +588,7 @@ error(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_ERROR, fmt, args);
+	do_log(LOG_LEVEL_ERROR, fmt, args);
 	va_end(args);
 }
 
@@ -586,7 +598,7 @@ debug(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_DEBUG1, fmt, args);
+	do_log(LOG_LEVEL_DEBUG1, fmt, args);
 	va_end(args);
 }
 
@@ -596,7 +608,7 @@ debug3(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_DEBUG3, fmt, args);
+	do_log(LOG_LEVEL_DEBUG3, fmt, args);
 	va_end(args);
 }
 
@@ -632,16 +644,16 @@ debug3(const char *fmt,...)
 /* 				if (next != NULL) */
 /* 					*next = (cp == NULL) ? */
 /* 					    strlen(c) : (uint)(cp - c); */
-/* 				free(c); */
-/* 				free(s); */
+/* 				xfree(c); */
+/* 				xfree(s); */
 /* 				return ret; */
 /* 			} */
 /* 		} */
 /* 	} */
 /* 	if (next != NULL) */
 /* 		*next = strlen(c); */
-/* 	free(c); */
-/* 	free(s); */
+/* 	xfree(c); */
+/* 	xfree(s); */
 /* 	return NULL; */
 /* } */
 
@@ -651,7 +663,7 @@ debug2(const char *fmt,...)
 	va_list args;
 
 	va_start(args, fmt);
-	do_log(SYSLOG_LEVEL_DEBUG2, fmt, args);
+	do_log(LOG_LEVEL_DEBUG2, fmt, args);
 	va_end(args);
 }
 
@@ -828,12 +840,12 @@ static struct sshbuf *
 sshbuf_new(void)
 {
 	struct sshbuf *ret;
-	if ((ret = calloc(sizeof(*ret), 1)) == NULL)
+	if ((ret = xcalloc(sizeof(*ret), 1)) == NULL)
 		return NULL;
 	ret->alloc = SSHBUF_SIZE_INIT;
 	ret->max_size = SSHBUF_SIZE_MAX;
-	if ((ret->d = calloc(1, ret->alloc)) == NULL) {
-		free(ret);
+	if ((ret->d = xcalloc(1, ret->alloc)) == NULL) {
+		xfree(ret);
 		return NULL;
 	}
 	return ret;
@@ -858,7 +870,7 @@ sshbuf_free(struct sshbuf *buf)
 	 * refcount to 0 and trigger the actual free.
 	 */
 	memset(buf, 0, sizeof(*buf));
-	free(buf);
+	xfree(buf);
 }
 
 static size_t
@@ -929,7 +941,7 @@ sshbuf_reserve(struct sshbuf *buf, size_t len, uint8_t **dpp)
 		rlen = ROUNDUP(buf->alloc + need, SSHBUF_SIZE_INC);
 		if (rlen > buf->max_size)
 			rlen = buf->alloc + need;
-		if ((dp = realloc(buf->d, rlen)) == NULL) {
+		if ((dp = xrealloc(buf->d, rlen)) == NULL) {
 			if (dpp != NULL)
 				*dpp = NULL;
 			return SSH_ERR_ALLOC_FAIL;
@@ -1067,7 +1079,7 @@ sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
 	if ((r = sshbuf_skip_string(buf)) != 0)
 		return -1;
 	if (valp != NULL) {
-		if ((*valp = malloc(len + 1)) == NULL) {
+		if ((*valp = xmalloc(len + 1)) == NULL) {
 			return SSH_ERR_ALLOC_FAIL;
 		}
 		if (len != 0)
@@ -1262,7 +1274,7 @@ sshbuf_reset(struct sshbuf *buf)
 		memset(buf->d, 0, buf->alloc);
 	buf->off = buf->size = 0;
 	if (buf->alloc != SSHBUF_SIZE_INIT) {
-		if ((d = realloc(buf->d, SSHBUF_SIZE_INIT)) != NULL) {
+		if ((d = xrealloc(buf->d, SSHBUF_SIZE_INIT)) != NULL) {
 			buf->d = d;
 			buf->alloc = SSHBUF_SIZE_INIT;
 		}
@@ -1286,7 +1298,7 @@ sshbuf_reset(struct sshbuf *buf)
 /* 	} */
 /* 	if (request_whitelist != NULL && */
 /* 	    ((result = match_list(h->name, request_whitelist, NULL))) != NULL) { */
-/* 		free(result); */
+/* 		xfree(result); */
 /* 		debug2("Permitting whitelisted %s request", h->name); */
 /* 		return 1; */
 /* 	} */
@@ -1296,8 +1308,6 @@ sshbuf_reset(struct sshbuf *buf)
 /* 	} */
 /* 	return 1; */
 /* } */
-
-#define tell_error(msg) verbose("%s: %d at %s", (msg), GetLastError(), __func__)
 
 static int
 last_error_to_portable(void)
@@ -1382,35 +1392,6 @@ last_error_to_portable(void)
 /* 		flags |= O_EXCL; */
 /* 	return flags; */
 /* } */
-
-static const char *
-string_from_portable(int pflags)
-{
-	static char ret[128];
-
-	*ret = '\0';
-
-#define PAPPEND(str)	{				\
-		if (*ret != '\0')			\
-			strlcat(ret, ",", sizeof(ret));	\
-		strlcat(ret, str, sizeof(ret));		\
-	}
-
-	if (pflags & SSH2_FXF_READ)
-		PAPPEND("READ")
-	if (pflags & SSH2_FXF_WRITE)
-		PAPPEND("WRITE")
-	if (pflags & SSH2_FXF_APPEND)
-		PAPPEND("APPEND")
-	if (pflags & SSH2_FXF_CREAT)
-		PAPPEND("CREATE")
-	if (pflags & SSH2_FXF_TRUNC)
-		PAPPEND("TRUNCATE")
-	if (pflags & SSH2_FXF_EXCL)
-		PAPPEND("EXCL")
-
-	return ret;
-}
 
 /* handle handles */
 
@@ -1767,9 +1748,9 @@ handle_close(int handle)
 	}
 
 	if (handles[handle].name)
-		free(handles[handle].name);
+		xfree(handles[handle].name);
 	if (handles[handle].dir_start)
-		free(handles[handle].dir_start);
+		xfree(handles[handle].dir_start);
 
 	return 0;
 }
@@ -1812,7 +1793,7 @@ get_handle(struct sshbuf *queue, int *hp)
 		return r;
 	if (hlen < 256)
 		*hp = handle_from_string(handle, hlen);
-	free(handle);
+	xfree(handle);
 	return 0;
 }
 
@@ -1853,7 +1834,7 @@ send_status(uint32_t id, uint32_t status)
 	int r;
 
 	debug3("request %u: sent status %u", id, status);
-	if (log_level > SYSLOG_LEVEL_VERBOSE ||
+	if (log_level > LOG_LEVEL_VERBOSE ||
 	    (status != SSH2_FX_OK && status != SSH2_FX_EOF))
 		logit("sent status %s", status_to_message(status));
 	if ((msg = sshbuf_new()) == NULL)
@@ -1903,7 +1884,7 @@ send_handle(uint32_t id, int handle)
 	handle_to_string(handle, &string, &hlen);
 	debug("request %u: sent handle handle %d", id, handle);
 	send_data_or_handle(SSH2_FXP_HANDLE, id, string, hlen);
-	free(string);
+	xfree(string);
 }
 
 static int
@@ -1975,8 +1956,8 @@ decode_attrib(struct sshbuf *b, Attrib *a)
 				return r;
 			debug3("Got file attribute \"%.100s\" len %zu",
 			    type, dlen);
-			free(type);
-			free(data);
+			xfree(type);
+			xfree(data);
 		}
 	}
 	return 0;
@@ -2107,7 +2088,7 @@ process_open(uint32_t id)
 cleanup:
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
-	free(name);
+	xfree(name);
 }
 
 static void
@@ -2232,7 +2213,7 @@ process_write(uint32_t id)
 		}
 	}
 	send_status(id, status);
-	free(data);
+	xfree(data);
 }
 
 static void
@@ -2260,7 +2241,7 @@ process_do_stat(uint32_t id, int do_lstat)
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
 	
-	free(name);
+	xfree(name);
 }
 
 static void
@@ -2352,7 +2333,7 @@ process_setstat(uint32_t id)
 			status = last_error_to_portable();
 	}
 	send_status(id, status);
-	free(name);
+	xfree(name);
 }
 
 static void
@@ -2460,8 +2441,8 @@ process_opendir(uint32_t id)
 	}
 	if (status != SSH2_FX_OK)
 		send_status(id, status);
-	free(path);
-        free(pattern);
+	xfree(path);
+        xfree(pattern);
 }
 
 /* #define	NCACHE	64			/\* power of 2 *\/ */
@@ -2613,7 +2594,7 @@ process_readdir(uint32_t id)
                         stats.long_name = xpathcat(path, fn);
                         w_stat(stats.long_name, &(stats.attrib));
                         send_names(id, 1, &stats);
-			free(fn);
+			xfree(fn);
                 }
                 else
                         send_status(id, SSH2_FX_EOF);
@@ -2634,7 +2615,7 @@ process_remove(uint32_t id)
 	r = unlink(name);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
-	free(name);
+	xfree(name);
 }
 
 static void
@@ -2656,7 +2637,7 @@ process_mkdir(uint32_t id)
 	r = mkdir(name); // TODO: set mode!
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
-	free(name);
+	xfree(name);
 }
 
 static void
@@ -2673,7 +2654,7 @@ process_rmdir(uint32_t id)
 	r = rmdir(name);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
-	free(name);
+	xfree(name);
 }
 
 static char *
@@ -2695,7 +2676,7 @@ process_realpath(uint32_t id)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	if (path[0] == '\0') {
-		free(path);
+		xfree(path);
 		path = xstrdup(".");
 	}
 	debug3("request %u: realpath", id);
@@ -2708,7 +2689,7 @@ process_realpath(uint32_t id)
 		s.name = s.long_name = resolvedname;
 		send_names(id, 1, &s);
 	}
-	free(path);
+	xfree(path);
 }
 
 static void
@@ -2733,8 +2714,8 @@ process_rename(uint32_t id)
 	}
 
 	send_status(id, status);
-	free(oldpath);
-	free(newpath);
+	xfree(oldpath);
+	xfree(newpath);
 }
 
 static void
@@ -2759,7 +2740,7 @@ process_readlink(uint32_t id)
 		s.name = s.long_name = buf;
 		send_names(id, 1, &s);
 	}
-	free(path);
+	xfree(path);
 }
 
 static void
@@ -2778,8 +2759,8 @@ process_symlink(uint32_t id)
 	r = w_symlink(oldpath, newpath);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
-	free(oldpath);
-	free(newpath);
+	xfree(oldpath);
+	xfree(newpath);
 }
 
 static void
@@ -2797,8 +2778,8 @@ process_extended_posix_rename(uint32_t id)
 	r = rename(oldpath, newpath);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
-	free(oldpath);
-	free(newpath);
+	xfree(oldpath);
+	xfree(newpath);
 }
 
 static void
@@ -2816,8 +2797,8 @@ process_extended_hardlink(uint32_t id)
 	r = w_link(oldpath, newpath);
 	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
 	send_status(id, status);
-	free(oldpath);
-	free(newpath);
+	xfree(oldpath);
+	xfree(newpath);
 }
 
 static void
@@ -2864,7 +2845,7 @@ process_extended(uint32_t id)
 		error("Unknown extended request \"%.100s\"", request);
 		send_status(id, SSH2_FX_OP_UNSUPPORTED);	/* MUST */
 	}
-	free(request);
+	xfree(request);
 }
 
 /* stolen from ssh-agent */
@@ -3012,16 +2993,16 @@ static struct {
 	LogLevel val;
 } log_levels[] =
 {
-	{ "QUIET",	SYSLOG_LEVEL_QUIET },
-	{ "FATAL",	SYSLOG_LEVEL_FATAL },
-	{ "ERROR",	SYSLOG_LEVEL_ERROR },
-	{ "INFO",	SYSLOG_LEVEL_INFO },
-	{ "VERBOSE",	SYSLOG_LEVEL_VERBOSE },
-	{ "DEBUG",	SYSLOG_LEVEL_DEBUG1 },
-	{ "DEBUG1",	SYSLOG_LEVEL_DEBUG1 },
-	{ "DEBUG2",	SYSLOG_LEVEL_DEBUG2 },
-	{ "DEBUG3",	SYSLOG_LEVEL_DEBUG3 },
-	{ NULL,		SYSLOG_LEVEL_NOT_SET }
+	{ "QUIET",	LOG_LEVEL_QUIET },
+	{ "FATAL",	LOG_LEVEL_FATAL },
+	{ "ERROR",	LOG_LEVEL_ERROR },
+	{ "INFO",	LOG_LEVEL_INFO },
+	{ "VERBOSE",	LOG_LEVEL_VERBOSE },
+	{ "DEBUG",	LOG_LEVEL_DEBUG1 },
+	{ "DEBUG1",	LOG_LEVEL_DEBUG1 },
+	{ "DEBUG2",	LOG_LEVEL_DEBUG2 },
+	{ "DEBUG3",	LOG_LEVEL_DEBUG3 },
+	{ NULL,		LOG_LEVEL_NOT_SET }
 };
 
 static LogLevel
@@ -3033,7 +3014,7 @@ log_level_number(char *name)
 		for (i = 0; log_levels[i].name; i++)
 			if (strcasecmp(log_levels[i].name, name) == 0)
 				return log_levels[i].val;
-	return SYSLOG_LEVEL_NOT_SET;
+	return LOG_LEVEL_NOT_SET;
 }
 
 /* char * */
@@ -3146,10 +3127,12 @@ int
 sftp_server_main(int argc, char **argv)
 {
 	fd_set *rset, *wset;
-	int i, r, in, out, max, ch, skipargs = 0, log_stderr = 0;
-	ssize_t len, olen, set_size;
+	int i, r, ch, skipargs = 0, log_stderr = 0;
+	ssize_t set_size;
 	char *cp, *homedir = NULL, buf[4*4096];
 	long mask;
+
+	HANDLE in, out;
 
 	extern char *optarg;
 	extern char *__progname;
@@ -3187,7 +3170,7 @@ sftp_server_main(int argc, char **argv)
 			break;
 		case 'l':
 			log_level = log_level_number(optarg);
-			if (log_level == SYSLOG_LEVEL_NOT_SET)
+			if (log_level == LOG_LEVEL_NOT_SET)
 				error("Invalid log level \"%s\"", optarg);
 			break;
 		case 'f':
@@ -3196,7 +3179,7 @@ sftp_server_main(int argc, char **argv)
 			/* cp = tilde_expand_filename(optarg), user_pw->pw_uid); */
 			/* homedir = percent_expand(cp, "d", user_pw->pw_dir, */
 			/*     "u", user_pw->pw_name, (char *)NULL); */
-			/* free(cp); */
+			/* xfree(cp); */
 
 			// TODO: Fixme!
 			homedir = tilde_expand_filename(optarg);
@@ -3247,17 +3230,8 @@ sftp_server_main(int argc, char **argv)
 	logit("session opened for local user %s from [%s]",
 	    pw->pw_name, client_addr);
 
-	in = STDIN_FILENO;
-	out = STDOUT_FILENO;
-
-	setmode(in, O_BINARY);
-	setmode(out, O_BINARY);
-
-	max = 0;
-	if (in > max)
-		max = in;
-	if (out > max)
-		max = out;
+	in = GetStdHandle(STD_INPUT_HANDLE);
+	out = GetStdHandle(STD_OUTPUT_HANDLE);
 
 	if ((iqueue = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
@@ -3270,34 +3244,36 @@ sftp_server_main(int argc, char **argv)
 		}
 	}
 	for (;;) {
+		DWORD olen, bytes;
 		if (sshbuf_check_reserve(oqueue, SFTP_MAX_MSG_LENGTH) == 0)
 			process();
 
 		olen = sshbuf_len(oqueue);
 		if (olen > 0) {
-			len = write(out, sshbuf_ptr(oqueue), olen);
-			if (len < 0) {
-				error("write: %s", strerror(errno));
-				cleanup_exit(1);
-			} else if ((r = sshbuf_consume(oqueue, len)) != 0) {
-				fatal("%s: buffer error: %d", __func__, r);
+			if (WriteFile(out, sshbuf_ptr(oqueue), olen, &bytes, NULL)) {
+				if ((r = sshbuf_consume(oqueue, bytes)) != 0)
+					fatal("%s: buffer error: %d", __func__, r);
+				continue;
 			}
-			continue;
+			else
+				fatal("%s: WriteFile failed: %d", __func__, GetLastError());
 		}
 
 		if ((r = sshbuf_check_reserve(iqueue, sizeof(buf))) != 0)
 			fatal("%s: sshbuf_check_reserve failed: %d", __func__, r);
 
-		len = read(in, buf, sizeof buf);
-		if (len == 0) {
-			debug("read eof");
-			cleanup_exit(0);
-		} else if (len < 0) {
-			error("read: %s", strerror(errno));
-			cleanup_exit(1);
-		} else if ((r = sshbuf_put(iqueue, buf, len)) != 0) {
-			fatal("%s: buffer error: %d", __func__, r);
+		if (ReadFile(in, buf, sizeof(buf), &bytes, NULL)) {
+			if (bytes > 0) {
+				if ((r = sshbuf_put(iqueue, buf, bytes)) != 0)
+					fatal("%s: buffer error: %d", __func__, r);
+			}
+			else {
+				debug("read eof");
+				cleanup_exit(0);
+			}
 		}
+		else
+			fatal("%s: ReadFile failed: %d", __func__, GetLastError());
 	}
 }
 
