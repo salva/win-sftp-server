@@ -16,6 +16,7 @@
  */
 
 #include <windows.h>
+#include <strsafe.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -280,7 +281,7 @@ strlcat(char *dst, const char *src, size_t siz)
 //#define S_IXOTH 1
 
 void
-win_attrib_to_str(DWORD attrib, char *p)
+file_info_to_str(DWORD attrib, char *p)
 {
 	int is_dir = 0;
 
@@ -1374,36 +1375,18 @@ file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a) {
 }
 
 static int
-w_hstat(HANDLE h, Attrib *a) {
-        BY_HANDLE_FILE_INFORMATION file_info;
-        if (GetFileInformationByHandle(h, &file_info)) {
-                file_info_to_attrib(&file_info, a);
-                return 1;
-        }
-        else {
-                tell_error("GetFileInformationByHandle");
-                attrib_clear(a);
-                return 0;
-        }
-}
-
-static int
-w_stat(char *name, Attrib *a) {
-        HANDLE h = CreateFile(name,
+GetFileInformation(char *name, BY_HANDLE_FILE_INFORMATION *file_info) {
+	int rc = 0;
+	HANDLE h = CreateFile(name,
                               FILE_READ_ATTRIBUTES,
                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
         if (h != INVALID_HANDLE_VALUE) {
-                int rc = w_hstat(h, a);
-                CloseHandle(h);
-                return rc;
-        }
-        else {
-                tell_error("CreateFile failed");
-                attrib_clear(a);
-                return 0;
-        }
- }
+		rc = GetFileInformationByHandle(h, file_info);
+		CloseHandle(h);
+	}
+	return rc;
+}
 
 static int
 w_link(char *oldpath, char *newpath) {
@@ -2081,7 +2064,10 @@ process_do_stat(uint32_t id, int do_lstat)
 
 	// TODO: add lstat back
 	// r = do_lstat ? lstat(name, &st) : stat(name, &st);
-	if (w_hstat(name, &a)) {
+
+	BY_HANDLE_FILE_INFORMATION file_info;
+	if (GetFileInformation(name, &file_info)) {
+		file_info_to_attrib(&file_info, &a);
 		send_attrib(id, &a);
 		status = SSH2_FX_OK;
 	}
@@ -2119,7 +2105,9 @@ process_fstat(uint32_t id)
 	    id, handle_to_name(handle), handle);
 	fd = handle_to_win_file_handle(handle);
 	if (fd != INVALID_HANDLE_VALUE) {
-                if (w_hstat(fd, &a)) {
+		BY_HANDLE_FILE_INFORMATION file_info;
+                if (GetFileInformationByHandle(fd, &file_info)) {
+			file_info_to_attrib(&file_info, &a);
                         send_attrib(id, &a);
 			status = SSH2_FX_OK;
                 }
@@ -2373,39 +2361,73 @@ group_from_gid(gid_t gid, int nogroup) {
 	return "carambolas";
 }
 
- char *
-ls_file(const char *name, BY_HANDLE_FILE_INFORMATION *info, int remote)
-{
-	int ulen, glen;
-	char *user, *group;
-	char buf[1024], mode[11+1], tbuf[12+1];
-
-	win_attrib_to_str(info->dwFileAttributes, mode);
-	/* TODO: fixme! */
-	/* user = user_from_uid(st->st_uid, 0); */
-	user = "paco";
-	/* group = group_from_gid(st->st_gid, 0); */
-	group = "carambolas";
-
-	/* TODO: generate timestamp from info */
-	/* now = time(NULL); */
-	/* if (now - (365*24*60*60)/2 < st->st_mtime && */
-	/*     now >= st->st_mtime) */
-	/* 	sz = strftime(tbuf, sizeof tbuf, "%b %e %H:%M", ltime); */
-	/* else */
-	/* 	sz = strftime(tbuf, sizeof tbuf, "%b %e  %Y", ltime); */
-	strcpy(tbuf, "Once upon a time");
-
-	ulen = MAXIMUM(strlen(user), 8);
-	glen = MAXIMUM(strlen(group), 8);
-
-	/* TODO: Fix link number */
-	snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8llu %s %s", mode,
-		 (uint)1, ulen, user, glen, group,
-		 file_info_to_size(info), tbuf, name);
-
-	return xstrdup(buf);
+static char *
+xprintf(const char *fmt, ...) {
+	size_t max = 100;
+	char *line = NULL;
+	while (1) {
+		line = xrealloc(line, max);
+		va_list args;
+		va_start(args, fmt);
+		HRESULT rc = StringCchVPrintf(line, max, fmt, args);
+		va_end(args);
+		switch (rc) {
+		case S_OK:
+			return line;
+		case STRSAFE_E_INVALID_PARAMETER:
+			fatal_error("StringCchVprintf failed");
+		}
+		max *= 2;
+	}
 }
+
+static char *
+lls(const char *name, BY_HANDLE_FILE_INFORMATION *file_info) {
+	char mode[11 + 1];
+	file_info_to_str(file_info->dwFileAttributes, mode);
+	char *user = "paco";
+	char *group = "carambolas";
+	char *mtime = "yesterday";
+
+	return xprintf("%s %u %s %s %8llu %s %s",
+		       mode, 1, user, group,
+		       file_info_to_size(file_info),
+		       mtime, name);
+}
+
+/*  char * */
+/* ls_file(const char *name, BY_HANDLE_FILE_INFORMATION *info) */
+/* { */
+/* 	int ulen, glen; */
+/* 	char *user, *group; */
+/* 	char buf[1024], mode[11+1], tbuf[12+1]; */
+
+/* 	file_info_to_str(info->dwFileAttributes, mode); */
+/* 	/\* TODO: fixme! *\/ */
+/* 	/\* user = user_from_uid(st->st_uid, 0); *\/ */
+/* 	user = "paco"; */
+/* 	/\* group = group_from_gid(st->st_gid, 0); *\/ */
+/* 	group = "carambolas"; */
+
+/* 	/\* TODO: generate timestamp from info *\/ */
+/* 	/\* now = time(NULL); *\/ */
+/* 	/\* if (now - (365*24*60*60)/2 < st->st_mtime && *\/ */
+/* 	/\*     now >= st->st_mtime) *\/ */
+/* 	/\* 	sz = strftime(tbuf, sizeof tbuf, "%b %e %H:%M", ltime); *\/ */
+/* 	/\* else *\/ */
+/* 	/\* 	sz = strftime(tbuf, sizeof tbuf, "%b %e  %Y", ltime); *\/ */
+/* 	strcpy(tbuf, "Once upon a time"); */
+
+/* 	ulen = MAXIMUM(strlen(user), 8); */
+/* 	glen = MAXIMUM(strlen(group), 8); */
+
+/* 	/\* TODO: Fix link number *\/ */
+/* 	snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8llu %s %s", mode, */
+/* 		 (uint)1, ulen, user, glen, group, */
+/* 		 file_info_to_size(info), tbuf, name); */
+
+/* 	return xstrdup(buf); */
+/* } */
 
 static void
 process_readdir(uint32_t id)
@@ -2436,13 +2458,23 @@ process_readdir(uint32_t id)
                 }
                 if (fn) {
                         // TODO: send more than one entry per packet
+                        char *fullname = xpathcat(path, fn);
+			BY_HANDLE_FILE_INFORMATION file_info;
                         Stat stats;
-                        attrib_clear(&(stats.attrib));
                         stats.name = fn;
-                        stats.long_name = xpathcat(path, fn);
-                        w_stat(stats.long_name, &(stats.attrib));
+			if (GetFileInformation(fullname, &file_info)) {
+				file_info_to_attrib(&file_info, &stats.attrib);
+				stats.long_name = lls(fn, &file_info);
+			}
+			else {
+				attrib_clear(&stats.attrib);
+				stats.long_name = lls(fn, NULL);
+			}
+
                         send_names(id, 1, &stats);
 			xfree(fn);
+			xfree(fullname);
+			xfree(stats.long_name);
                 }
                 else
                         send_status(id, SSH2_FX_EOF);
@@ -2509,8 +2541,9 @@ static char *
 realpath(char *path, char *realpath)
 {
 	// TODO: Fixme!
-	strcpy(realpath, path);
-	return realpath;
+	//strcpy(realpath, path);
+	//return realpath;
+	return NULL;
 }
 
 static void
