@@ -17,6 +17,7 @@
 
 #include <windows.h>
 #include <strsafe.h>
+#include <aclapi.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -281,8 +282,10 @@ strlcat(char *dst, const char *src, size_t siz)
 //#define S_IXOTH 1
 
 void
-file_info_to_str(DWORD attrib, char *p)
+file_info_to_str(BY_HANDLE_FILE_INFORMATION *info, char *p)
 {
+
+        DWORD attrib = info->dwFileAttributes;
 	int is_dir = 0;
 
 	if (attrib & FILE_ATTRIBUTE_DIRECTORY) {
@@ -301,7 +304,7 @@ file_info_to_str(DWORD attrib, char *p)
 
 	*p++ = 'r';
 	*p++ = 'w';
-	memset(p, 6, '-');
+	memset(p, '-', 6);
 	p[6] = ' ';
 	p[7] = 0;
 }
@@ -1381,9 +1384,11 @@ GetFileInformation(char *name, BY_HANDLE_FILE_INFORMATION *file_info) {
                               FILE_READ_ATTRIBUTES,
                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-		rc = GetFileInformationByHandle(h, file_info);
-		CloseHandle(h);
+        if (h == INVALID_HANDLE_VALUE)
+                tell_error("CreateFile failed");
+        else {
+                rc = GetFileInformationByHandle(h, file_info);
+                CloseHandle(h);
 	}
 	return rc;
 }
@@ -2381,54 +2386,6 @@ xprintf(const char *fmt, ...) {
 	}
 }
 
-static char *
-lls(const char *name, BY_HANDLE_FILE_INFORMATION *file_info) {
-	char mode[11 + 1];
-	file_info_to_str(file_info->dwFileAttributes, mode);
-	char *user = "paco";
-	char *group = "carambolas";
-	char *mtime = "yesterday";
-
-	return xprintf("%s %u %s %s %8llu %s %s",
-		       mode, 1, user, group,
-		       file_info_to_size(file_info),
-		       mtime, name);
-}
-
-/*  char * */
-/* ls_file(const char *name, BY_HANDLE_FILE_INFORMATION *info) */
-/* { */
-/* 	int ulen, glen; */
-/* 	char *user, *group; */
-/* 	char buf[1024], mode[11+1], tbuf[12+1]; */
-
-/* 	file_info_to_str(info->dwFileAttributes, mode); */
-/* 	/\* TODO: fixme! *\/ */
-/* 	/\* user = user_from_uid(st->st_uid, 0); *\/ */
-/* 	user = "paco"; */
-/* 	/\* group = group_from_gid(st->st_gid, 0); *\/ */
-/* 	group = "carambolas"; */
-
-/* 	/\* TODO: generate timestamp from info *\/ */
-/* 	/\* now = time(NULL); *\/ */
-/* 	/\* if (now - (365*24*60*60)/2 < st->st_mtime && *\/ */
-/* 	/\*     now >= st->st_mtime) *\/ */
-/* 	/\* 	sz = strftime(tbuf, sizeof tbuf, "%b %e %H:%M", ltime); *\/ */
-/* 	/\* else *\/ */
-/* 	/\* 	sz = strftime(tbuf, sizeof tbuf, "%b %e  %Y", ltime); *\/ */
-/* 	strcpy(tbuf, "Once upon a time"); */
-
-/* 	ulen = MAXIMUM(strlen(user), 8); */
-/* 	glen = MAXIMUM(strlen(group), 8); */
-
-/* 	/\* TODO: Fix link number *\/ */
-/* 	snprintf(buf, sizeof buf, "%s %3u %-*s %-*s %8llu %s %s", mode, */
-/* 		 (uint)1, ulen, user, glen, group, */
-/* 		 file_info_to_size(info), tbuf, name); */
-
-/* 	return xstrdup(buf); */
-/* } */
-
 static void
 process_readdir(uint32_t id)
 {
@@ -2459,22 +2416,94 @@ process_readdir(uint32_t id)
                 if (fn) {
                         // TODO: send more than one entry per packet
                         char *fullname = xpathcat(path, fn);
-			BY_HANDLE_FILE_INFORMATION file_info;
                         Stat stats;
+                        char *user = NULL, *group = NULL;
+                        char mode[11 + 1];
+                        StringCbCopy(mode, sizeof(mode), "---------- "); // default value
+                        
                         stats.name = fn;
-			if (GetFileInformation(fullname, &file_info)) {
-				file_info_to_attrib(&file_info, &stats.attrib);
-				stats.long_name = lls(fn, &file_info);
-			}
-			else {
-				attrib_clear(&stats.attrib);
-				stats.long_name = lls(fn, NULL);
-			}
+                        attrib_clear(&stats.attrib);                        
+                        HANDLE fd = CreateFile(fullname, 
+                                               FILE_READ_ATTRIBUTES|READ_CONTROL,
+                                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                        if (fd == INVALID_HANDLE_VALUE)
+                            tell_error("CreateFile failed");
+                        else {
+                            BY_HANDLE_FILE_INFORMATION file_info;
+                            if (GetFileInformationByHandle(fd, &file_info)) {
+                                file_info_to_attrib(&file_info, &stats.attrib);
+                                file_info_to_str(&file_info, mode);
+                            }
+                            else
+                                tell_error("GetFileInformationByHandle failed");
+
+                            SECURITY_DESCRIPTOR *sd = NULL;
+                            SID *sid_owner = NULL, *sid_group = NULL;
+                            if (GetSecurityInfo(fd, SE_FILE_OBJECT,
+                                                OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION,
+                                                (void **)&sid_owner, (void **)&sid_group,
+                                                NULL, NULL,
+                                                (void**)&sd) == ERROR_SUCCESS) {
+                                
+                                SID_NAME_USE use = SidTypeUnknown;
+                                DWORD user_size = 0, group_size = 0, domain_size = 0;
+                                LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &domain_size, &use);
+                                if (user_size) {
+                                        char *domain = xmalloc(domain_size);
+                                        user = xmalloc(user_size);
+                                        if (!LookupAccountSid(NULL, sid_owner, user, &user_size, domain, &domain_size, &use)) {
+                                                tell_error("LookupAccountSid failed (2)");
+                                                xfree(user);
+                                                user = NULL;
+                                        }
+                                        else {
+                                                debug("user: %s, domain: %s", user, domain);
+                                        }
+                                        xfree(domain);
+                                }
+                                else
+                                        tell_error("LookupAccountSid failed (1)");
+
+                                domain_size = 0;
+                                LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &domain_size, &use);
+                                if (group_size) {
+                                        char *domain = xmalloc(domain_size);
+                                        group = xmalloc(group_size);
+                                        if (!LookupAccountSid(NULL, sid_group, group, &group_size, domain, &domain_size, &use)) {
+                                                tell_error("LookupAccountSid failed (4)");
+                                                xfree(group);
+                                                group = NULL;
+                                        }
+                                        else {
+                                                debug("group: %s, domain: %s", group, domain);
+                                        }
+                                        xfree(domain);
+                                }
+                                else
+                                        tell_error("LookupAccountSid failed (1)");
+
+                                LocalFree(sd);
+                            }
+                            else
+                                    tell_error("Get<SecurityInfo failed");
+
+                            CloseHandle(fd);
+                        }
+                        stats.long_name = xprintf("%s %u %s %s %8llu %s %s",
+                                                  mode, 1,
+                                                  (user ? user : "?"),
+                                                  (group ? group : "?"),
+                                                  stats.attrib.size,
+                                                  "yesterday",
+                                                  fullname);
 
                         send_names(id, 1, &stats);
 			xfree(fn);
 			xfree(fullname);
 			xfree(stats.long_name);
+                        if (user) xfree(user);
+                        if (group) xfree(group);
                 }
                 else
                         send_status(id, SSH2_FX_EOF);
@@ -3075,6 +3104,8 @@ sftp_server_main(int argc, char **argv)
 		}
 	}
 
+        debug("arguments parsed");
+        
 	/*
 	 * On platforms where we can, avoid making /proc/self/{mem,maps}
 	 * available to the user so that sftp access doesn't automatically
@@ -3093,6 +3124,8 @@ sftp_server_main(int argc, char **argv)
 	} else
 		client_addr = xstrdup("UNKNOWN");
 
+        debug("client addr is %s", client_addr);
+        
 	logit("session opened for local user %s from [%s]",
 	    pw->pw_name, client_addr);
 
@@ -3146,6 +3179,7 @@ sftp_server_main(int argc, char **argv)
 static void
 sanitise_stdfd(void)
 {
+        debug("std fds sanitized");
 	// TODO: Fixme!
 	return;
 
