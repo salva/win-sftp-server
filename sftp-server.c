@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <wchar.h>
 
 #define	SSH2_FILEXFER_VERSION		3
 
@@ -161,7 +162,7 @@ static char *request_whitelist, *request_blacklist;
 typedef struct Stat Stat;
 
 struct Stat {
-	char *name;
+	wchar_t *name;
 	char *long_name;
 	Attrib attrib;
 };
@@ -391,6 +392,19 @@ xcalloc(size_t nmemb, size_t size)
 	return ptr;
 }
 
+#define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
+
+static void *
+xmallocarray(size_t nmemb, size_t size)
+{
+	if ((nmemb < MUL_NO_OVERFLOW && size < MUL_NO_OVERFLOW) ||
+	    nmemb == 0 || SIZE_MAX / nmemb > size)
+		return xmalloc(size * nmemb);
+
+	fatal("xmallocarray: arguments out of limits, %u elements of %u bytes",
+	      nmemb, size);
+}
+
 static char *
 xstrdup(const char *str)
 {
@@ -404,11 +418,31 @@ xstrdup(const char *str)
 	return cp;
 }
 
+static wchar_t *
+xwcsdup(const wchar_t *wstr)
+{
+	size_t len;
+	wchar_t *cp;
+	if (wstr == NULL)
+		fatal("xwcsdup: NULL pointer");
+	len = wcslen(wstr) + 1;
+	cp = xmallocarray(sizeof(wchar_t), len);
+	wmemcpy(cp, wstr, len);
+	return cp;
+}
+
 static void *
 xcopy(const void *data, size_t size) {
         void *copy = xmalloc(size);
         memcpy(copy, data, size);
         return copy;
+}
+
+static wchar_t *
+xwcopy(const wchar_t *data, size_t size) {
+	wchar_t *copy = xmallocarray(sizeof(wchar_t), size);
+	memcpy(copy, data, size * sizeof(wchar_t));
+	return copy;
 }
 
 /* static int */
@@ -428,8 +462,6 @@ xcopy(const void *data, size_t size) {
 /* } */
 
 
-#define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
-
 static void *
 xrealloc(void *ptr, size_t size) {
 	void *new_ptr = (ptr
@@ -443,8 +475,6 @@ xrealloc(void *ptr, size_t size) {
 static void *
 xreallocarray(void *ptr, size_t nmemb, size_t size)
 {
-
-
 	if ((nmemb < MUL_NO_OVERFLOW && size < MUL_NO_OVERFLOW) ||
 	    nmemb == 0 || SIZE_MAX / nmemb > size)
 		return xrealloc(ptr, size * nmemb);
@@ -453,36 +483,36 @@ xreallocarray(void *ptr, size_t nmemb, size_t size)
 	      nmemb, size);
 }
 
-static char *
-xstrcat(char *str, char *cat, size_t *new_len) {
-        size_t str_len = strlen(str);
-        size_t cat_len = strlen(cat);
+static wchar_t *
+xwcscat(wchar_t *str, wchar_t *cat, size_t *new_len) {
+        size_t str_len = wcslen(str);
+        size_t cat_len = wcslen(cat);
 
-        str = xreallocarray(str, 1, str_len + cat_len + 1);
-        memmove(str + str_len, cat, cat_len + 1);
+        str = xreallocarray(str, sizeof(wchar_t), str_len + cat_len + 1);
+        wmemcpy(str + str_len, cat, cat_len + 1);
         if (new_len) *new_len = str_len + cat_len;
         return str;
 }
 
-static char *
-xpathcat(char *base, char *name) {
-        char *long_name;
+static wchar_t *
+xpathcat(wchar_t *base, wchar_t *name) {
+        wchar_t *long_name;
         // FIXME: handle case where name starts by '\\' or '/' 
         if (isalpha(name[0]) && name[1] == ':' &&
             (name[2] == '/' || name[2] == '\\'))
-                long_name = xstrdup(name);
+                long_name = xwcsdup(name);
         else {
-                int base_len  = strlen(base);
-                int name_len = strlen(name);
+                int base_len  = wcslen(base);
+                int name_len = wcslen(name);
                 if (!base_len) {
-                        base = ".\\";
+                        base = L".\\";
                         base_len = 2;
                 }
-                long_name = xmalloc(base_len + name_len + 2);
-                memcpy(long_name, base, base_len);
+                long_name = xmallocarray(sizeof(wchar_t), base_len + name_len + 2);
+                wmemcpy(long_name, base, base_len);
                 if (base[base_len - 1] != '/' && base[base_len - 1] != '\\')
                         long_name[base_len++] = '/';
-                memcpy(long_name + base_len, name, name_len + 1);
+                wmemcpy(long_name + base_len, name, name_len + 1);
         }
         return long_name;
 }
@@ -912,7 +942,7 @@ sshbuf_peek_string_direct(const struct sshbuf *buf, const uint8_t **valp,
 static int
 sshbuf_get_string_direct(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
 {
-	size_t len;
+	uint32_t len;
 	const uint8_t *p;
 	int r;
 
@@ -957,7 +987,7 @@ sshbuf_get_string(struct sshbuf *buf, uint8_t **valp, size_t *lenp)
 }
 
 static int
-sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
+sshbuf_peek_cstring(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
 {
 	size_t len;
 	const uint8_t *p, *z;
@@ -974,19 +1004,93 @@ sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
 	    (z = memchr(p , '\0', len)) != NULL && z < p + len - 1) {
 		return SSH_ERR_INVALID_FORMAT;
 	}
+	if (valp) *valp = p;
+	if (lenp) *lenp = len;
+	return 0;
+}
+
+static int
+sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
+{
+	size_t len;
+	const uint8_t *p;
+	int r;
+
+	if (valp != NULL)
+		*valp = NULL;
+	if (lenp != NULL)
+		*lenp = 0;
+	if ((r = sshbuf_peek_cstring(buf, &p, &len)) != 0)
+		return r;
+
 	if ((r = sshbuf_skip_string(buf)) != 0)
 		return -1;
+
 	if (valp != NULL) {
-		if ((*valp = xmalloc(len + 1)) == NULL) {
-			return SSH_ERR_ALLOC_FAIL;
-		}
+		*valp = xmalloc(len + 1);
 		if (len != 0)
 			memcpy(*valp, p, len);
 		(*valp)[len] = '\0';
 	}
 	if (lenp != NULL)
-		*lenp = (size_t)len;
+		*lenp = len;
 	return 0;
+}
+
+static int
+sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, size_t *lenp)
+{
+	size_t len;
+	const uint8_t *p;
+	int r;
+
+	if (valp != NULL)
+		*valp = NULL;
+	if (lenp != NULL)
+		*lenp = 0;
+	if ((r = sshbuf_peek_cstring(buf, &p, &len)) != 0)
+		return r;
+
+	if ((r = sshbuf_skip_string(buf)) != 0)
+		return -1;
+
+	size_t wlen;
+	if (len) {
+		if ((wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+						(const char *)p, len, NULL, 0)) != 0) {
+			if (valp) {
+				*valp = xmallocarray(wlen + 1, sizeof(WCHAR));
+				if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+							(const char *)p, len, *valp, wlen + 1) == wlen) {
+					(*valp)[wlen] = 0;
+				}
+				else {
+					tell_error("MultibyteToWideChar failed");
+					xfree(*valp);
+					*valp = NULL;
+					return SSH_ERR_INVALID_FORMAT;
+				}
+			}
+			if (lenp)
+				*lenp = wlen;
+		}
+		else {
+			tell_error("MultiByteToWideChar failed");
+			return SSH_ERR_INVALID_FORMAT;
+		}
+	}
+	else {
+		debug("zero length path given");
+		if (valp) {
+			*valp = xmallocarray(1, sizeof(WCHAR));
+			(*valp)[0] = 0;
+		}
+	}
+
+	if (valp && *valp)
+		debug3("get_path: %ls", *valp);
+
+	return  0;
 }
 
 static int
@@ -1115,9 +1219,48 @@ sshbuf_put_string(struct sshbuf *buf, const void *v, size_t len)
 }
 
 static int
+sshbuf_put_wcs(struct sshbuf *buf, const void *v, size_t wlen)
+{
+	uint8_t *d;
+	int r;
+
+	if (wlen) {
+		size_t alen = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, v, wlen,
+						  NULL, 0, "?", NULL);
+		if (alen) {
+			if (alen > SSHBUF_SIZE_MAX - 4) {
+				return SSH_ERR_NO_BUFFER_SPACE;
+			}
+			if ((r = sshbuf_reserve(buf, alen + 4, &d)) < 0)
+				return r;
+			POKE_U32(d, alen);
+			if (WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, v, wlen,
+						(char *)d + 4, alen, "?", NULL) == alen)
+				return 0;
+			else {
+				tell_error("WideCharToMultiByte failed (2)");
+				return SSH_ERR_NO_BUFFER_SPACE;
+			}
+		}
+		else {
+			tell_error("WideCharToMultiByte failed (1)");
+			return SSH_ERR_NO_BUFFER_SPACE;
+		}
+	}
+	else
+		return sshbuf_put_string(buf, "", 0);
+}
+
+static int
 sshbuf_put_cstring(struct sshbuf *buf, const char *v)
 {
 	return sshbuf_put_string(buf, (uint8_t *)v, v == NULL ? 0 : strlen(v));
+}
+
+static int
+sshbuf_put_path(struct sshbuf *buf, const wchar_t *v)
+{
+	return sshbuf_put_wcs(buf, v, v == NULL ? 0 : wcslen(v));
 }
 
 static int
@@ -1273,10 +1416,10 @@ struct Handle {
 	int use;
 	HANDLE fd;
 	int flags;
-	char *name;
+	wchar_t *name;
 	uint64_t bytes_read, bytes_write;
 	int next_unused;
-        char *dir_start;
+        wchar_t *dir_start;
 };
 
 enum {
@@ -1304,15 +1447,15 @@ win_time_to_posix(FILETIME ft) {
 }
 
 static int
-w_utimes(char *name, uint32_t mtime, uint32_t atime)
+w_utimes(wchar_t *name, uint32_t mtime, uint32_t atime)
 {
 
 	FILETIME wmtime = posix_time_to_win(mtime);
 	FILETIME watime = posix_time_to_win(atime);
 
 	int rc = 0;
-	HANDLE h = CreateFile(name, FILE_WRITE_ATTRIBUTES, 0,
-			      NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	HANDLE h = CreateFileW(name, FILE_WRITE_ATTRIBUTES, 0,
+			       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
 	if (h == INVALID_HANDLE_VALUE)
 		rc = -1;
@@ -1329,7 +1472,7 @@ typedef unsigned int uid_t;
 typedef unsigned int gid_t;
 
 static int
-w_chown(char *name, uid_t uid, gid_t gid)
+w_chown(wchar_t *name, uid_t uid, gid_t gid)
 {
 	// TODO: implement me!
 	error("w_chown(%s, %d, %d) <- unimplemented", name, uid, gid);
@@ -1350,13 +1493,38 @@ attrib_clear(Attrib *a)
 }
 
 static int
-win_attrib_to_posix_mode(DWORD attrib) {
-        int mode = 0;
+win_attrib_to_posix_mode(DWORD attrib, const wchar_t *path) {
+        int mode;
         if (attrib & FILE_ATTRIBUTE_DIRECTORY)
-                mode |=  040000;
-        else if (attrib & FILE_ATTRIBUTE_NORMAL)
-                mode |= 0100000;
-        mode |= 0700;
+                mode =  040700;
+        else if (attrib & FILE_ATTRIBUTE_DEVICE)
+		mode = 060000;
+	else {
+                mode = 0100600;
+
+		size_t len1 = GetShortPathNameW(path, NULL, 0);
+		if (len1) {
+			wchar_t *shortname = xmallocarray(sizeof(wchar_t), len1);
+			size_t len = len1 - 1;
+			if (GetShortPathNameW(path, shortname, len1) == len) {
+				debug3("short name: %s, len: %ld", shortname, len);
+				if (len >= 4) {
+					wchar_t *ext = shortname + (len - 4);
+					debug3("extension: %s", ext);
+					if ((_wcsicmp(ext, L".EXE") == 0) ||
+					    (_wcsicmp(ext, L".COM") == 0) ||
+					    (_wcsicmp(ext, L".BAT") == 0))
+						mode |= 0100;
+				}
+			}
+			else
+				tell_error("GetShortPathName failed (2)");
+			xfree(shortname);
+		}
+		else
+			tell_error("GetShortPathName failed");
+	}
+        debug3("win_attrib_to_posix_mode(%lx) -> %lx", (unsigned long)attrib, (unsigned long)mode);
         return mode;
 }
 
@@ -1366,24 +1534,24 @@ file_info_to_size(BY_HANDLE_FILE_INFORMATION *info) {
 }
 
 static void
-file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a) {
+file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a, const wchar_t *path) {
 	attrib_clear(a);
         a->flags |= SSH2_FILEXFER_ATTR_SIZE;
         a->size = file_info_to_size(info);
         a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
-        a->perm = win_attrib_to_posix_mode(info->dwFileAttributes);
+        a->perm = win_attrib_to_posix_mode(info->dwFileAttributes, path);
         a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
 	a->atime = win_time_to_posix(info->ftLastAccessTime);
         a->mtime = win_time_to_posix(info->ftLastWriteTime);
 }
 
 static int
-GetFileInformation(char *name, BY_HANDLE_FILE_INFORMATION *file_info) {
+GetFileInformationW(wchar_t *name, BY_HANDLE_FILE_INFORMATION *file_info) {
 	int rc = 0;
-	HANDLE h = CreateFile(name,
-                              FILE_READ_ATTRIBUTES,
-                              FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	HANDLE h = CreateFileW(name,
+			       FILE_READ_ATTRIBUTES,
+			       FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+			       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
         if (h == INVALID_HANDLE_VALUE)
                 tell_error("CreateFile failed");
         else {
@@ -1451,7 +1619,7 @@ handle_unused(int i)
 }
 
 static int
-handle_new(int use, const char *name, HANDLE fd, int flags, char *dir_start) {
+handle_new(int use, const wchar_t *name, HANDLE fd, int flags, wchar_t *dir_start) {
 	int i;
 
 	if (first_unused_handle == -1) {
@@ -1467,15 +1635,15 @@ handle_new(int use, const char *name, HANDLE fd, int flags, char *dir_start) {
 	i = first_unused_handle;
 	first_unused_handle = handles[i].next_unused;
 
-	debug3("handle_new(use: %d, name: %s, HANDLE: 0x%x, flags: 0x%x, %s) -> %d",
+	debug3("handle_new(use: %d, name: %ls, HANDLE: 0x%x, flags: 0x%x, %s) -> %d",
 	       use, name, fd, flags, dir_start, i);
 
 	handles[i].use = (use | HANDLE_USED);
 	handles[i].fd = fd;
 	handles[i].flags = flags;
-	handles[i].name = xstrdup(name);
+	handles[i].name = xwcsdup(name);
 	handles[i].bytes_read = handles[i].bytes_write = 0;
-        handles[i].dir_start = (dir_start ? xstrdup(dir_start) : NULL);
+        handles[i].dir_start = (dir_start ? xwcsdup(dir_start) : NULL);
 	return i;
 }
 
@@ -1486,9 +1654,9 @@ handle_is_ok(int i, int type)
 		(handles[i].use & HANDLE_USED) && (handles[i].use & type);
 }
 
-static char *
+static wchar_t *
 handle_dir_start_and_reset(int i) {
-        char *start;
+        wchar_t *start;
         if (!handle_is_ok(i, HANDLE_DIR))
                 fatal("internal error: handle_delete_dir_start called on a non dir handle");
         start = handles[i].dir_start;
@@ -1520,7 +1688,7 @@ handle_from_string(const uint8_t *handle, uint hlen)
 	return -1;
 }
 
-static char *
+static wchar_t *
 handle_to_name(int handle)
 {
 	if (handle_is_ok(handle, HANDLE_FILE|HANDLE_DIR))
@@ -1816,7 +1984,7 @@ send_names(uint32_t id, int count, const Stat *stats)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug("request %u: sent names count %d", id, count);
 	for (i = 0; i < count; i++) {
-		if ((r = sshbuf_put_cstring(msg, stats[i].name)) != 0 ||
+		if ((r = sshbuf_put_path(msg, stats[i].name)) != 0 ||
 		    (r = sshbuf_put_cstring(msg, stats[i].long_name)) != 0 ||
 		    (r = encode_attrib(msg, &stats[i].attrib)) != 0)
 			fatal("%s: buffer error: %d", __func__, r);
@@ -1876,13 +2044,13 @@ process_open(uint32_t id)
 {
 	uint32_t pflags;
 	Attrib a;
-	char *name;
+	wchar_t *name;
 	int r, handle, status = SSH2_FX_FAILURE;
 	HANDLE fd;
 	DWORD access = 0;
 	DWORD creation = OPEN_EXISTING;
 
-	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0 ||
+	if ((r = sshbuf_get_path(iqueue, &name, NULL)) != 0 ||
 	    (r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
 	    (r = decode_attrib(iqueue, &a)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
@@ -1911,7 +2079,7 @@ process_open(uint32_t id)
                 status = SSH2_FX_PERMISSION_DENIED;
         }
         else {
-		fd = CreateFile(name, access, 0, NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
+		fd = CreateFileW(name, access, 0, NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (fd == INVALID_HANDLE_VALUE) {
 			status = last_error_to_portable();
 		} else {
@@ -2058,21 +2226,21 @@ static void
 process_do_stat(uint32_t id, int do_lstat)
 {
 	Attrib a;
-	char *name;
+	wchar_t *name;
 	int r, status = SSH2_FX_FAILURE;
 
-	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &name, NULL)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: %sstat", id, do_lstat ? "l" : "");
-	verbose("%sstat name \"%s\"", do_lstat ? "l" : "", name);
+	verbose("%sstat name \"%ls\"", do_lstat ? "l" : "", name);
 
 	// TODO: add lstat back
 	// r = do_lstat ? lstat(name, &st) : stat(name, &st);
 
 	BY_HANDLE_FILE_INFORMATION file_info;
-	if (GetFileInformation(name, &file_info)) {
-		file_info_to_attrib(&file_info, &a);
+	if (GetFileInformationW(name, &file_info)) {
+		file_info_to_attrib(&file_info, &a, name);
 		send_attrib(id, &a);
 		status = SSH2_FX_OK;
 	}
@@ -2103,7 +2271,7 @@ process_fstat(uint32_t id)
 	Attrib a;
 	int r, handle, status = SSH2_FX_FAILURE;
         HANDLE fd;
-        
+
 	if ((r = get_handle(iqueue, &handle)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug("request %u: fstat \"%s\" (handle %u)",
@@ -2112,7 +2280,7 @@ process_fstat(uint32_t id)
 	if (fd != INVALID_HANDLE_VALUE) {
 		BY_HANDLE_FILE_INFORMATION file_info;
                 if (GetFileInformationByHandle(fd, &file_info)) {
-			file_info_to_attrib(&file_info, &a);
+			file_info_to_attrib(&file_info, &a, handle_to_name(handle));
                         send_attrib(id, &a);
 			status = SSH2_FX_OK;
                 }
@@ -2128,19 +2296,19 @@ static void
 process_setstat(uint32_t id)
 {
 	Attrib a;
-	char *name;
+	wchar_t *name;
 	int r, status = SSH2_FX_OK;
 
-	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0 ||
+	if ((r = sshbuf_get_path(iqueue, &name, NULL)) != 0 ||
 	    (r = decode_attrib(iqueue, &a)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
-	debug("request %u: setstat name \"%s\"", id, name);
+	debug("request %u: setstat name \"%ls\"", id, name);
 	if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
-		logit("set \"%s\" size %llu",
+		logit("set \"%ls\" size %llu",
 		    name, (unsigned long long)a.size);
-		HANDLE fd = CreateFile(name, GENERIC_WRITE, 0,
-			   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		HANDLE fd = CreateFileW(name, GENERIC_WRITE, 0,
+					NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (fd != INVALID_HANDLE_VALUE) {
 			LARGE_INTEGER off;
 			off.QuadPart = a.size;
@@ -2152,10 +2320,11 @@ process_setstat(uint32_t id)
 			status = last_error_to_portable();
 	}
 	if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-		logit("set \"%s\" mode %04o", name, a.perm);
-		r = chmod(name, a.perm & 07777);
-		if (r == -1)
-			status = last_error_to_portable();
+		logit("set \"%ls\" mode %04o", name, a.perm);
+		// FIXME: reimplement chmod
+		// r = chmod(name, a.perm & 07777);
+		// if (r == -1)
+		// status = last_error_to_portable();
 	}
 	if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
 		char buf[64];
@@ -2163,7 +2332,7 @@ process_setstat(uint32_t id)
 
 		strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
 		    localtime(&t));
-		logit("set \"%s\" modtime %s", name, buf);
+		logit("set \"%ls\" modtime %s", name, buf);
 		r = w_utimes(name, a.mtime, a.atime);
 		if (r == -1)
 			status = last_error_to_portable();
@@ -2196,7 +2365,7 @@ process_fsetstat(uint32_t id)
 	if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_FAILURE;
 	else {
-		char *name = handle_to_name(handle);
+		wchar_t *name = handle_to_name(handle);
 
 		if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
 			logit("set \"%s\" size %llu",
@@ -2210,7 +2379,8 @@ process_fsetstat(uint32_t id)
 #ifdef HAVE_FCHMOD
 			r = fchmod(fd, a.perm & 07777);
 #else
-			r = chmod(name, a.perm & 07777);
+			// TODO: reimplement chmod!
+			/* r = chmod(name, a.perm & 07777); */
 #endif
 			if (r == -1)
 				status = last_error_to_portable();
@@ -2247,27 +2417,29 @@ static void
 process_opendir(uint32_t id)
 {
         HANDLE dd;
-	char *path, *pattern;
+	wchar_t *path, *pattern;
 	int r, handle, status = SSH2_FX_FAILURE;
         size_t path_len;
-        WIN32_FIND_DATA find_data;
+        WIN32_FIND_DATAW find_data;
 
-	if ((r = sshbuf_get_cstring(iqueue, &path, &path_len)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &path, &path_len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: opendir", id);
-	logit("opendir \"%s\"", path);
+	logit("opendir \"%ls\", len: %ld", path, path_len);
 
         if (path_len == 0 || (path_len == 2 && isalpha(path[0]) && path[1] == ':'))
-                path = xstrcat(path, "./", &path_len);
+                path = xwcscat(path, L"./", &path_len);
         else if (path[path_len - 1] == '/' || path[path_len - 1] == '\\')
-                path = xcopy(path, path_len + 1);
+                path = xwcopy(path, path_len + 1);
         else
-                path = xstrcat(path, "/", &path_len);
+                path = xwcscat(path, L"/", &path_len);
 
-        pattern = xstrcat(xcopy(path, path_len + 1), "*", &path_len);
+        pattern = xwcscat(xwcopy(path, path_len + 1), L"*", &path_len);
 
-        dd = FindFirstFile(pattern, &find_data);
+	debug3("FindFistFileW(pattern=%ls)", pattern);
+
+        dd = FindFirstFileW(pattern, &find_data);
 
         if (dd == INVALID_HANDLE_VALUE) {
                 tell_error("FindFirstFile failed");
@@ -2392,7 +2564,7 @@ process_readdir(uint32_t id)
         // TODO: Fix memory leaks!
 
         HANDLE dd;
-	char *path;
+	wchar_t *path;
 	int r, handle;
 
 	if ((r = get_handle(iqueue, &handle)) != 0)
@@ -2405,35 +2577,35 @@ process_readdir(uint32_t id)
 	if (dd == INVALID_HANDLE_VALUE || path == NULL) {
 		send_status(id, SSH2_FX_FAILURE);
 	} else {
-                char *fn = handle_dir_start_and_reset(handle);
+                wchar_t *fn = handle_dir_start_and_reset(handle);
                 if (!fn) {
-                        WIN32_FIND_DATA find_data;
-                        if (FindNextFile(dd, &find_data))
-                                fn = xstrdup(find_data.cFileName);
+                        WIN32_FIND_DATAW find_data;
+                        if (FindNextFileW(dd, &find_data))
+                                fn = xwcsdup(find_data.cFileName);
                         else
                                 tell_error("FindNextFile failed");
                 }
                 if (fn) {
                         // TODO: send more than one entry per packet
-                        char *fullname = xpathcat(path, fn);
+                        wchar_t *fullname = xpathcat(path, fn);
                         Stat stats;
                         char *user = NULL, *group = NULL;
                         char mode[11 + 1];
                         StringCbCopy(mode, sizeof(mode), "---------- "); // default value
-                        
+
                         stats.name = fn;
-                        attrib_clear(&stats.attrib);                        
-                        HANDLE fd = CreateFile(fullname, 
-                                               FILE_READ_ATTRIBUTES|READ_CONTROL,
-                                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                               NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                        attrib_clear(&stats.attrib);
+                        HANDLE fd = CreateFileW(fullname,
+						FILE_READ_ATTRIBUTES|READ_CONTROL,
+						FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+						NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
                         if (fd == INVALID_HANDLE_VALUE)
                             tell_error("CreateFile failed");
                         else {
                             BY_HANDLE_FILE_INFORMATION file_info;
                             if (GetFileInformationByHandle(fd, &file_info)) {
-                                file_info_to_attrib(&file_info, &stats.attrib);
-                                file_info_to_str(&file_info, mode);
+				    file_info_to_attrib(&file_info, &stats.attrib, fullname);
+				    file_info_to_str(&file_info, mode);
                             }
                             else
                                 tell_error("GetFileInformationByHandle failed");
@@ -2445,7 +2617,7 @@ process_readdir(uint32_t id)
                                                 (void **)&sid_owner, (void **)&sid_group,
                                                 NULL, NULL,
                                                 (void**)&sd) == ERROR_SUCCESS) {
-                                
+
                                 SID_NAME_USE use = SidTypeUnknown;
                                 DWORD user_size = 0, group_size = 0, domain_size = 0;
                                 LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &domain_size, &use);
@@ -2486,11 +2658,11 @@ process_readdir(uint32_t id)
                                 LocalFree(sd);
                             }
                             else
-                                    tell_error("Get<SecurityInfo failed");
+                                    tell_error("GetSecurityInfo failed");
 
                             CloseHandle(fd);
                         }
-                        stats.long_name = xprintf("%s %u %s %s %8llu %s %s",
+                        stats.long_name = xprintf("%s %u %s %s %8llu %s %ls",
                                                   mode, 1,
                                                   (user ? user : "?"),
                                                   (group ? group : "?"),
@@ -2566,37 +2738,39 @@ process_rmdir(uint32_t id)
 	xfree(name);
 }
 
-static char *
-realpath(char *path, char *realpath)
+static wchar_t *
+realpath(wchar_t *path)
 {
 	// TODO: Fixme!
 	//strcpy(realpath, path);
 	//return realpath;
-	return NULL;
+	return xwcsdup(path);
 }
 
 static void
 process_realpath(uint32_t id)
 {
-	char resolvedname[PATH_MAX];
-	char *path;
+	wchar_t *resolvedname;
+	wchar_t *path;
 	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &path, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &path, NULL)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	if (path[0] == '\0') {
 		xfree(path);
-		path = xstrdup(".");
+		path = xwcsdup(L".");
 	}
 	debug3("request %u: realpath", id);
-	verbose("realpath \"%s\"", path);
-	if (realpath(path, resolvedname) == NULL) {
+	verbose("realpath \"%ls\"", path);
+	resolvedname = realpath(path);
+	if (resolvedname == NULL) {
 		send_status(id, last_error_to_portable());
 	} else {
 		Stat s;
 		attrib_clear(&s.attrib);
-		s.name = s.long_name = resolvedname;
+		s.name = resolvedname;
+		s.long_name = xstrdup("");
 		send_names(id, 1, &s);
 	}
 	xfree(path);
@@ -2646,7 +2820,8 @@ process_readlink(uint32_t id)
 
 		buf[len] = '\0';
 		attrib_clear(&s.attrib);
-		s.name = s.long_name = buf;
+		// TODO: fixme!!!
+		//s.name = s.long_name = buf;
 		send_names(id, 1, &s);
 	}
 	xfree(path);
