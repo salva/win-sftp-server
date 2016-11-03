@@ -163,7 +163,7 @@ typedef struct Stat Stat;
 
 struct Stat {
 	wchar_t *name;
-	char *long_name;
+	wchar_t *long_name;
 	Attrib attrib;
 };
 
@@ -233,6 +233,7 @@ struct sftp_handler extended_handlers[] = {
 
 static void fatal(const char *, ...) __attribute__((noreturn)) __attribute__((format(printf, 1, 2)));
 static void verbose(const char *fmt, ...);
+static void debug3(const char *fmt,...);
 static void do_log(LogLevel level, const char *fmt, va_list args);
 
 static void cleanup_exit(int) __attribute__((noreturn));
@@ -283,7 +284,7 @@ strlcat(char *dst, const char *src, size_t siz)
 //#define S_IXOTH 1
 
 void
-file_info_to_str(BY_HANDLE_FILE_INFORMATION *info, char *p)
+file_info_to_str(BY_HANDLE_FILE_INFORMATION *info, wchar_t *p)
 {
 
         DWORD attrib = info->dwFileAttributes;
@@ -305,9 +306,7 @@ file_info_to_str(BY_HANDLE_FILE_INFORMATION *info, char *p)
 
 	*p++ = 'r';
 	*p++ = 'w';
-	memset(p, '-', 6);
-	p[6] = ' ';
-	p[7] = 0;
+        wmemcpy(p, L"------ ", 8);
 }
 
 /* static int */
@@ -405,6 +404,11 @@ xmallocarray(size_t nmemb, size_t size)
 	      nmemb, size);
 }
 
+static wchar_t *
+xwcsalloc(size_t nmemb) {
+        return xmallocarray(nmemb, sizeof(wchar_t));
+}
+
 static char *
 xstrdup(const char *str)
 {
@@ -421,28 +425,24 @@ xstrdup(const char *str)
 static wchar_t *
 xwcsdup(const wchar_t *wstr)
 {
-	size_t len;
-	wchar_t *cp;
-	if (wstr == NULL)
-		fatal("xwcsdup: NULL pointer");
-	len = wcslen(wstr) + 1;
-	cp = xmallocarray(sizeof(wchar_t), len);
+	if (wstr == NULL) fatal("xwcsdup: NULL pointer");
+
+        size_t len = wcslen(wstr) + 1;
+        wchar_t *cp = xwcsalloc(len);
 	wmemcpy(cp, wstr, len);
 	return cp;
 }
 
 static void *
-xcopy(const void *data, size_t size) {
-        void *copy = xmalloc(size);
-        memcpy(copy, data, size);
-        return copy;
+xcopyarray(const void *data, size_t nmenb, size_t size) {
+        void *cp = xmallocarray(nmenb, size);
+        memcpy(cp, data, nmenb * size);
+        return cp;
 }
 
 static wchar_t *
 xwcopy(const wchar_t *data, size_t size) {
-	wchar_t *copy = xmallocarray(sizeof(wchar_t), size);
-	memcpy(copy, data, size * sizeof(wchar_t));
-	return copy;
+        return (wchar_t *)xcopyarray(data, size, sizeof(wchar_t));
 }
 
 /* static int */
@@ -484,36 +484,48 @@ xreallocarray(void *ptr, size_t nmemb, size_t size)
 }
 
 static wchar_t *
-xwcscat(wchar_t *str, wchar_t *cat, size_t *new_len) {
+xwcscat(wchar_t *str, wchar_t *cat) {
         size_t str_len = wcslen(str);
         size_t cat_len = wcslen(cat);
-
-        str = xreallocarray(str, sizeof(wchar_t), str_len + cat_len + 1);
-        wmemcpy(str + str_len, cat, cat_len + 1);
-        if (new_len) *new_len = str_len + cat_len;
-        return str;
+        
+        wchar_t *cp = xwcsalloc(str_len + cat_len + 1);
+        wmemcpy(cp, str, str_len);
+        wmemcpy(cp + str_len, cat, cat_len + 1);
+        return cp;
 }
 
 static wchar_t *
-xpathcat(wchar_t *base, wchar_t *name) {
-        wchar_t *long_name;
-        // FIXME: handle case where name starts by '\\' or '/' 
-        if (isalpha(name[0]) && name[1] == ':' &&
-            (name[2] == '/' || name[2] == '\\'))
-                long_name = xwcsdup(name);
-        else {
-                int base_len  = wcslen(base);
-                int name_len = wcslen(name);
-                if (!base_len) {
-                        base = L".\\";
-                        base_len = 2;
-                }
-                long_name = xmallocarray(sizeof(wchar_t), base_len + name_len + 2);
-                wmemcpy(long_name, base, base_len);
-                if (base[base_len - 1] != '/' && base[base_len - 1] != '\\')
-                        long_name[base_len++] = '/';
-                wmemcpy(long_name + base_len, name, name_len + 1);
+xpathjoin(wchar_t *base, wchar_t *name) {
+        // network: \\foo\bar
+        if (name[0] == '\\' && name[1] == '\\')
+                return xwcsdup(name);
+
+        // volume: C:
+        if (isalpha(name[0]) && name[1] == ':') {
+                // volume + absolute path
+                if (name[2] == '\0')
+                        return xwcscat(name, L"/");
+                // just volume: c:
+                if (name[2] == '/' || name[2] == '\\')
+                        return xwcsdup(name);
+
+                // volume + relative is forbidden: c:foo.txt
+                debug3("xpathjoin(%ls, %ls) failed, volume + relative path is forbidden", base, name);
+                SetLastError(ERROR_BAD_PATHNAME);
+                return NULL;
         }
+
+        // append name to base:
+        int base_len  = (base ? wcslen(base) : 0);
+        int name_len = wcslen(name);
+        if (!base_len)
+                return (name_len ? xwcopy(name, name_len + 1) : xwcopy(L".", 2));
+
+        wchar_t *long_name = xwcsalloc(base_len + name_len + 2);
+        wmemcpy(long_name, base, base_len);
+        if (base[base_len - 1] != '/' && base[base_len - 1] != '\\')
+                long_name[base_len++] = '/';
+        wmemcpy(long_name + base_len, name, name_len + 1);
         return long_name;
 }
 
@@ -1059,9 +1071,9 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, size_t *lenp)
 		if ((wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
 						(const char *)p, len, NULL, 0)) != 0) {
 			if (valp) {
-				*valp = xmallocarray(wlen + 1, sizeof(WCHAR));
+				*valp = xwcsalloc(wlen + 1);
 				if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-							(const char *)p, len, *valp, wlen + 1) == wlen) {
+							(const char *)p, len, *valp, wlen) == wlen) {
 					(*valp)[wlen] = 0;
 				}
 				else {
@@ -1081,10 +1093,8 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, size_t *lenp)
 	}
 	else {
 		debug("zero length path given");
-		if (valp) {
-			*valp = xmallocarray(1, sizeof(WCHAR));
-			(*valp)[0] = 0;
-		}
+		if (valp)
+			*valp = xwcsdup(L"");
 	}
 
 	if (valp && *valp)
@@ -1508,7 +1518,7 @@ win_attrib_to_posix_mode(DWORD attrib, const wchar_t *path) {
 
 		size_t len1 = GetShortPathNameW(path, NULL, 0);
 		if (len1) {
-			wchar_t *shortname = xmallocarray(sizeof(wchar_t), len1);
+			wchar_t *shortname = xwcsalloc(len1);
 			size_t len = len1 - 1;
 			if (GetShortPathNameW(path, shortname, len1) == len) {
 				debug3("short name: %s, len: %ld", shortname, len);
@@ -1569,22 +1579,6 @@ static int
 w_link(char *oldpath, char *newpath) {
 	// TODO: implement me!
 	error("w_link(%s, %s) <- unimplemented", oldpath, newpath);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_symlink(char *oldpath, char *newpath) {
-	// TODO: implement me!
-	error("w_symlink(%s, %s) <- unimplemented", oldpath, newpath);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
-w_readlink(char *path, char *buf, size_t size) {
-	// TODO: implement me!
-	error("w_symlink(%s, ...) <- unimplemented", path);
 	SetLastError(ERROR_NOT_SUPPORTED);
 	return -1;
 }
@@ -1989,7 +1983,7 @@ send_names(uint32_t id, int count, const Stat *stats)
 	debug("request %u: sent names count %d", id, count);
 	for (i = 0; i < count; i++) {
 		if ((r = sshbuf_put_path(msg, stats[i].name)) != 0 ||
-		    (r = sshbuf_put_cstring(msg, stats[i].long_name)) != 0 ||
+		    (r = sshbuf_put_path(msg, stats[i].long_name)) != 0 ||
 		    (r = encode_attrib(msg, &stats[i].attrib)) != 0)
 			fatal("%s: buffer error: %d", __func__, r);
 	}
@@ -2430,36 +2424,44 @@ process_opendir(uint32_t id)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: opendir", id);
-	logit("opendir \"%ls\", len: %ld", path, path_len);
 
-        if (path_len == 0 || (path_len == 2 && isalpha(path[0]) && path[1] == ':'))
-                path = xwcscat(path, L"./", &path_len);
-        else if (path[path_len - 1] == '/' || path[path_len - 1] == '\\')
-                path = xwcopy(path, path_len + 1);
-        else
-                path = xwcscat(path, L"/", &path_len);
+        wchar_t *fullpath = xpathjoin(NULL, path);
 
-        pattern = xwcscat(xwcopy(path, path_len + 1), L"*", &path_len);
+	logit("opendir \"%ls\", len: %ld, fullpath: %ls", path, path_len, fullpath);
 
-	debug3("FindFistFileW(pattern=%ls)", pattern);
+        
+        if (fullpath) {
+                size_t len = wcslen(fullpath);
+                if (len == 0 || fullpath[len - 1] == '/' || fullpath[len - 1] == '\\') {
+                        path = xreallocarray(path, len + 1, sizeof(wchar_t));
+                        wmemcpy(path + len, L"/", 2);
+                        len++;
+                }
 
-        dd = FindFirstFileW(pattern, &find_data);
+                pattern = xwcscat(fullpath, L"*");
 
-        if (dd == INVALID_HANDLE_VALUE) {
-                tell_error("FindFirstFile failed");
-                status = last_error_to_portable();
+                debug3("FindFistFileW(pattern=%ls)", pattern);
+
+                dd = FindFirstFileW(pattern, &find_data);
+
+                if (dd == INVALID_HANDLE_VALUE) {
+                        tell_error("FindFirstFile failed");
+                        status = last_error_to_portable();
+                }
+                else {
+                        handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
+                        if (handle < 0) {
+                                w_close(dd);
+                        } else {
+                                send_handle(id, handle);
+                                status = SSH2_FX_OK;
+                        }
+                }
+                xfree(fullpath);
         }
-        else {
-		handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
-		if (handle < 0) {
-                        w_close(dd);
-		} else {
-			send_handle(id, handle);
-			status = SSH2_FX_OK;
-		}
-	}
-	if (status != SSH2_FX_OK)
-		send_status(id, status);
+        if (status != SSH2_FX_OK)
+                send_status(id, status);
+
 	xfree(path);
         xfree(pattern);
 }
@@ -2542,15 +2544,15 @@ group_from_gid(gid_t gid, int nogroup) {
 	return "carambolas";
 }
 
-static char *
-xprintf(const char *fmt, ...) {
+static wchar_t *
+xprintf(const wchar_t *fmt, ...) {
 	size_t max = 100;
-	char *line = NULL;
+	wchar_t *line = NULL;
 	while (1) {
-		line = xrealloc(line, max);
+		line = xreallocarray(line, max, sizeof(wchar_t));
 		va_list args;
 		va_start(args, fmt);
-		HRESULT rc = StringCchVPrintf(line, max, fmt, args);
+		HRESULT rc = StringCchVPrintfW(line, max, fmt, args);
 		va_end(args);
 		switch (rc) {
 		case S_OK:
@@ -2591,11 +2593,11 @@ process_readdir(uint32_t id)
                 }
                 if (fn) {
                         // TODO: send more than one entry per packet
-                        wchar_t *fullname = xpathcat(path, fn);
+                        wchar_t *fullname = xpathjoin(path, fn);
                         Stat stats;
-                        char *user = NULL, *group = NULL;
-                        char mode[11 + 1];
-                        StringCbCopy(mode, sizeof(mode), "---------- "); // default value
+                        wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL;
+                        wchar_t mode[11 + 1];
+                        StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
 
                         stats.name = fn;
                         attrib_clear(&stats.attrib);
@@ -2623,38 +2625,39 @@ process_readdir(uint32_t id)
                                                 (void**)&sd) == ERROR_SUCCESS) {
 
                                 SID_NAME_USE use = SidTypeUnknown;
-                                DWORD user_size = 0, group_size = 0, domain_size = 0;
-                                LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &domain_size, &use);
+                                DWORD user_size = 0, group_size = 0, user_domain_size = 0, group_domain_size = 0;
+                                LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &user_domain_size, &use);
                                 if (user_size) {
-                                        char *domain = xmalloc(domain_size);
-                                        user = xmalloc(user_size);
-                                        if (!LookupAccountSid(NULL, sid_owner, user, &user_size, domain, &domain_size, &use)) {
+                                        user_domain = xwcsalloc(user_domain_size);
+                                        user = xwcsalloc(user_size);
+                                        if (!LookupAccountSidW(NULL, sid_owner, user, &user_size, user_domain, &user_domain_size, &use)) {
                                                 tell_error("LookupAccountSid failed (2)");
                                                 xfree(user);
+                                                xfree(user_domain);
                                                 user = NULL;
+                                                group_domain = NULL;
                                         }
                                         else {
-                                                debug("user: %s, domain: %s", user, domain);
+                                                debug("user: %ls, domain: %ls", user, user_domain);
                                         }
-                                        xfree(domain);
                                 }
                                 else
                                         tell_error("LookupAccountSid failed (1)");
 
-                                domain_size = 0;
-                                LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &domain_size, &use);
+                                LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &group_domain_size, &use);
                                 if (group_size) {
-                                        char *domain = xmalloc(domain_size);
-                                        group = xmalloc(group_size);
-                                        if (!LookupAccountSid(NULL, sid_group, group, &group_size, domain, &domain_size, &use)) {
+                                        group_domain = xwcsalloc(group_domain_size);
+                                        group = xwcsalloc(group_size);
+                                        if (!LookupAccountSidW(NULL, sid_group, group, &group_size, group_domain, &group_domain_size, &use)) {
                                                 tell_error("LookupAccountSid failed (4)");
                                                 xfree(group);
+                                                xfree(group_domain);
                                                 group = NULL;
+                                                group_domain = NULL;
                                         }
                                         else {
-                                                debug("group: %s, domain: %s", group, domain);
+                                                debug("group: %ls, domain: %ls", group, group_domain);
                                         }
-                                        xfree(domain);
                                 }
                                 else
                                         tell_error("LookupAccountSid failed (1)");
@@ -2666,13 +2669,15 @@ process_readdir(uint32_t id)
 
                             CloseHandle(fd);
                         }
-                        stats.long_name = xprintf("%s %u %s %s %8llu %s %ls",
+                        stats.long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
                                                   mode, 1,
-                                                  (user ? user : "?"),
-                                                  (group ? group : "?"),
+                                                  (user ? user : L"?"),
+                                                  (user_domain ? user_domain : L"?"),
+                                                  (group ? group : L"?"),
+                                                  (group_domain ? group_domain : L"?"),
                                                   stats.attrib.size,
-                                                  "yesterday",
-                                                  fullname);
+                                                  L"yesterday",
+                                                  fn);
 
                         send_names(id, 1, &stats);
 			xfree(fn);
@@ -2680,6 +2685,8 @@ process_readdir(uint32_t id)
 			xfree(stats.long_name);
                         if (user) xfree(user);
                         if (group) xfree(group);
+                        if (user_domain) xfree(user_domain);
+                        if (group_domain) xfree(group_domain);
                 }
                 else
                         send_status(id, SSH2_FX_EOF);
@@ -2742,41 +2749,66 @@ process_rmdir(uint32_t id)
 	xfree(name);
 }
 
-static wchar_t *
-realpath(wchar_t *path)
-{
-	// TODO: Fixme!
-	//strcpy(realpath, path);
-	//return realpath;
-	return xwcsdup(path);
-}
-
 static void
 process_realpath(uint32_t id)
 {
-	wchar_t *resolvedname;
-	wchar_t *path;
+	wchar_t *path = NULL;
+        int status = SSH2_FX_FAILURE;
 	int r;
 
 	if ((r = sshbuf_get_path(iqueue, &path, NULL)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
-
-	if (path[0] == '\0') {
-		xfree(path);
-		path = xwcsdup(L".");
-	}
 	debug3("request %u: realpath", id);
 	verbose("realpath \"%ls\"", path);
-	resolvedname = realpath(path);
-	if (resolvedname == NULL) {
+        
+        wchar_t *sanepath = xpathjoin(NULL, path);
+        debug3("sanepath: %ls", sanepath);
+        if (sanepath) {
+                DWORD len = 100;
+                wchar_t *fullpath = NULL;
+                while (1) {
+                        fullpath = xreallocarray(fullpath, len, sizeof(wchar_t));
+                        DWORD len1 = GetFullPathNameW(sanepath, len, fullpath, NULL);
+                        if (len1 > 0) {
+                                if (len1 >= len) {
+                                        len = len1 + 10;
+                                        continue;
+                                }
+
+                                debug3("GetFullPathNameW(%ls) -> %ls (%ld)", sanepath, fullpath, len1);
+                                
+                                size_t len = GetLongPathNameW(fullpath, NULL, 0);
+                                if (len) {
+                                        wchar_t *longpath = xwcsalloc(len);
+                                        size_t len1 = GetLongPathNameW(fullpath, longpath, len);
+                                        if (len1 && len1 < len) {
+                                                Stat s;
+                                                attrib_clear(&s.attrib);
+                                                s.name = longpath;
+                                                s.long_name = xwcsdup(L"");
+                                                send_names(id, 1, &s);
+                                                status = SSH2_FX_OK;
+                                        }
+                                        else
+                                                tell_error("GetLongPathNameW failed (2)");
+                                        xfree(longpath);
+                                }
+                                else
+                                        tell_error("GetLongPathNameW failed (1)");
+                        }
+                        else
+                                tell_error("GetFullPathNameW failed");
+
+                        xfree(fullpath);
+
+                        break;
+                }
+
+                xfree(sanepath);
+        }
+        
+        if (status != SSH2_FX_OK)
 		send_status(id, last_error_to_portable());
-	} else {
-		Stat s;
-		attrib_clear(&s.attrib);
-		s.name = resolvedname;
-		s.long_name = xstrdup("");
-		send_names(id, 1, &s);
-	}
 	xfree(path);
 }
 
@@ -2808,26 +2840,17 @@ process_rename(uint32_t id)
 static void
 process_readlink(uint32_t id)
 {
-	int r, len;
-	char buf[PATH_MAX];
+	int r;
 	char *path;
 
 	if ((r = sshbuf_get_cstring(iqueue, &path, NULL)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: readlink", id);
-	verbose("readlink \"%s\"", path);
-	if ((len = w_readlink(path, buf, sizeof(buf) - 1)) == -1)
-		send_status(id, last_error_to_portable());
-	else {
-		Stat s;
+	verbose("readlink \"%s\" (unsupported)", path);
 
-		buf[len] = '\0';
-		attrib_clear(&s.attrib);
-		// TODO: fixme!!!
-		//s.name = s.long_name = buf;
-		send_names(id, 1, &s);
-	}
+        send_status(id, SSH2_FX_OP_UNSUPPORTED);
+
 	xfree(path);
 }
 
@@ -2835,18 +2858,17 @@ static void
 process_symlink(uint32_t id)
 {
 	char *oldpath, *newpath;
-	int r, status;
+	int r;
 
 	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
 	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: symlink", id);
-	logit("symlink old \"%s\" new \"%s\"", oldpath, newpath);
-	/* this will fail if 'newpath' exists */
-	r = w_symlink(oldpath, newpath);
-	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
+	logit("symlink old \"%s\" new \"%s\" (unsupported)", oldpath, newpath);
+
+	send_status(id, SSH2_FX_OP_UNSUPPORTED);
+
 	xfree(oldpath);
 	xfree(newpath);
 }
