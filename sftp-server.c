@@ -1561,26 +1561,11 @@ GetFileInformationW(wchar_t *name, BY_HANDLE_FILE_INFORMATION *file_info) {
 }
 
 static int
-w_link(char *oldpath, char *newpath) {
-	// TODO: implement me!
-	error("w_link(%s, %s) <- unimplemented", oldpath, newpath);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
 w_fsync(HANDLE fd) {
 	// TODO: implement me!
 	error("w_fsync(%d, ...) <- unimplemented", fd);
 	SetLastError(ERROR_NOT_SUPPORTED);
 	return -1;
-}
-
-static int
-w_close(HANDLE h) {
-	if (!CloseHandle(h))
-		return -1;
-	return 0;
 }
 
 static int
@@ -2068,7 +2053,7 @@ process_open(uint32_t id)
 		} else {
 			handle = handle_new(HANDLE_FILE, name, fd, pflags, NULL);
 			if (handle < 0) {
-				w_close(fd);
+                                CloseHandle(fd);
 			} else {
 				send_handle(id, handle);
 				status = SSH2_FX_OK;
@@ -2437,7 +2422,7 @@ process_opendir(uint32_t id)
                 else {
                         handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
                         if (handle < 0) {
-                                w_close(dd);
+                                CloseHandle(dd);
                         } else {
                                 send_handle(id, handle);
                                 status = SSH2_FX_OK;
@@ -2794,20 +2779,28 @@ process_extended_posix_rename(uint32_t id)
 static void
 process_extended_hardlink(uint32_t id)
 {
-	char *oldpath, *newpath;
-	int r, status;
+	wchar_t *oldpath, *newpath;
+	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
-	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &oldpath, NULL)) != 0 ||
+	    (r = sshbuf_get_path(iqueue, &newpath, NULL)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: hardlink", id);
-	logit("hardlink old \"%s\" new \"%s\"", oldpath, newpath);
-	r = w_link(oldpath, newpath);
-	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
-	xfree(oldpath);
-	xfree(newpath);
+	logit("hardlink old \"%ls\" new \"%ls\"", oldpath, newpath);
+
+        wchar_t *saneoldpath = xpathjoin(NULL, oldpath);
+        xfree(oldpath);
+        wchar_t *sanenewpath = xpathjoin(NULL, newpath);
+        xfree(newpath);
+
+        if (CreateHardLinkW(sanenewpath, saneoldpath, NULL))
+                send_status(id, SSH2_FX_OK);
+        else
+                send_status(id, last_error_to_portable());
+
+	xfree(saneoldpath);
+	xfree(sanenewpath);
 }
 
 static void
