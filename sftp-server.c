@@ -1488,15 +1488,6 @@ w_utimes(wchar_t *name, uint32_t mtime, uint32_t atime)
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
 
-static int
-w_chown(wchar_t *name, uid_t uid, gid_t gid)
-{
-	// TODO: implement me!
-	error("w_chown(%s, %d, %d) <- unimplemented", name, uid, gid);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
 static void
 attrib_clear(Attrib *a)
 {
@@ -2340,10 +2331,11 @@ process_setstat(uint32_t id)
 	}
 	if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
 		logit("set \"%s\" owner %lu group %lu", name,
-		    (u_long)a.uid, (u_long)a.gid);
-		r = w_chown(name, a.uid, a.gid);
-		if (r == -1)
-			status = last_error_to_portable();
+                      (u_long)a.uid, (u_long)a.gid);
+                // FIXME: reimplement chown
+		//r = w_chown(name, a.uid, a.gid);
+		//if (r == -1)
+                //status = last_error_to_portable();
 	}
 	send_status(id, status);
 	xfree(name);
@@ -2406,9 +2398,9 @@ process_fsetstat(uint32_t id)
 
 			// TODO: reimplement fchown
 			// r = fchown(fd, a.uid, a.gid);
-			r = w_chown(name, a.uid, a.gid);
-			if (r == -1)
-				status = last_error_to_portable();
+			// r = w_chown(name, a.uid, a.gid);
+			//if (r == -1)
+			//	status = last_error_to_portable();
 		}
 	}
 	send_status(id, status);
