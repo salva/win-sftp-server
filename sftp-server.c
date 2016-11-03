@@ -1561,14 +1561,6 @@ GetFileInformationW(wchar_t *name, BY_HANDLE_FILE_INFORMATION *file_info) {
 }
 
 static int
-w_fsync(HANDLE fd) {
-	// TODO: implement me!
-	error("w_fsync(%d, ...) <- unimplemented", fd);
-	SetLastError(ERROR_NOT_SUPPORTED);
-	return -1;
-}
-
-static int
 w_ftruncate(HANDLE h, off_t length) {
         return -1;
 }
@@ -2796,8 +2788,10 @@ process_extended_hardlink(uint32_t id)
 
         if (CreateHardLinkW(sanenewpath, saneoldpath, NULL))
                 send_status(id, SSH2_FX_OK);
-        else
+        else {
+                tell_error("CreateHardLinkW failed");
                 send_status(id, last_error_to_portable());
+        }
 
 	xfree(saneoldpath);
 	xfree(sanenewpath);
@@ -2817,8 +2811,10 @@ process_extended_fsync(uint32_t id)
         if (fd == INVALID_HANDLE_VALUE)
 		status = SSH2_FX_NO_SUCH_FILE;
 	else if (handle_is_ok(handle, HANDLE_FILE)) {
-		r = w_fsync(fd);
-		status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
+                if (FlushFileBuffers(fd))
+                        status = SSH2_FX_OK;
+                else
+                        status = last_error_to_portable();
 	}
 	send_status(id, status);
 }
