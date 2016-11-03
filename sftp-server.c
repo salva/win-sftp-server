@@ -3100,7 +3100,7 @@ percent_expand(const char *string, ...)
 }
 
 int
-sftp_server_main(int argc, char **argv)
+main(int argc, char **argv)
 {
 	int i, r, ch, skipargs = 0;
 	char *cp, *homedir = NULL, buf[4*4096];
@@ -3240,38 +3240,3 @@ sftp_server_main(int argc, char **argv)
 			fatal("%s: ReadFile failed: %lu", __func__, GetLastError());
 	}
 }
-
-static void
-sanitise_stdfd(void)
-{
-        debug("std fds sanitized");
-	// TODO: Fixme!
-	return;
-
-	/* int nullfd, dupfd; */
-
-	/* if ((nullfd = dupfd = open("/dev/null", O_RDWR)) == -1) { */
-	/* 	fprintf(stderr, "Couldn't open /dev/null: %s\n", */
-	/* 	    strerror(errno)); */
-	/* 	exit(1); */
-	/* } */
-	/* while (++dupfd <= STDERR_FILENO) { */
-	/* 	/\* Only populate closed fds. *\/ */
-	/* 	if (fcntl(dupfd, F_GETFL) == -1 && errno == EBADF) { */
-	/* 		if (dup2(nullfd, dupfd) == -1) { */
-	/* 			fprintf(stderr, "dup2: %s\n", strerror(errno)); */
-	/* 			exit(1); */
-	/* 		} */
-	/* 	} */
-	/* } */
-	/* if (nullfd > STDERR_FILENO) */
-	/* 	close(nullfd); */
-}
-
-int
-main(int argc, char **argv)
-{
-	sanitise_stdfd();
-	return (sftp_server_main(argc, argv));
-}
-
