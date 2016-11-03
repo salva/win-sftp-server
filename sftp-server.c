@@ -1218,15 +1218,19 @@ sshbuf_put_string(struct sshbuf *buf, const void *v, size_t len)
 	return 0;
 }
 
+#ifndef WC_ERR_INVALID_CHARS
+#define WC_ERR_INVALID_CHARS 0x80
+#endif
+
 static int
-sshbuf_put_wcs(struct sshbuf *buf, const void *v, size_t wlen)
+sshbuf_put_wcs(struct sshbuf *buf, const wchar_t *v, size_t wlen)
 {
 	uint8_t *d;
 	int r;
 
 	if (wlen) {
-		size_t alen = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, v, wlen,
-						  NULL, 0, "?", NULL);
+            size_t alen = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
+						  NULL, 0, NULL, NULL);
 		if (alen) {
 			if (alen > SSHBUF_SIZE_MAX - 4) {
 				return SSH_ERR_NO_BUFFER_SPACE;
@@ -1234,8 +1238,8 @@ sshbuf_put_wcs(struct sshbuf *buf, const void *v, size_t wlen)
 			if ((r = sshbuf_reserve(buf, alen + 4, &d)) < 0)
 				return r;
 			POKE_U32(d, alen);
-			if (WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, v, wlen,
-						(char *)d + 4, alen, "?", NULL) == alen)
+			if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
+						(char *)d + 4, alen, NULL, NULL) == alen)
 				return 0;
 			else {
 				tell_error("WideCharToMultiByte failed (2)");
