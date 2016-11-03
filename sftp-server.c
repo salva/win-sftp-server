@@ -134,12 +134,6 @@ struct sshbuf {
 /* Our verbosity */
 static LogLevel log_level = 0; //LOG_LEVEL_ERROR;
 
-/* Our client */
-struct passwd {
-	char *pw_name;
-};
-
-static struct passwd *pw = NULL;
 static char *client_addr = NULL;
 
 /* input and output queue */
@@ -2883,7 +2877,7 @@ process(void)
 	msg_len = get_u32(cp);
 	if (msg_len > SFTP_MAX_MSG_LENGTH) {
 		error("bad message from %s local user %s",
-		    client_addr, pw->pw_name);
+		    client_addr, NULL);
 		cleanup_exit(11);
 	}
 	if (buf_len < msg_len + 4)
@@ -2948,9 +2942,9 @@ process(void)
 static void
 cleanup_exit(int i)
 {
-	if (pw != NULL && client_addr != NULL) {
+	if (client_addr != NULL) {
 		logit("session closed for local user %s from [%s]",
-		    pw->pw_name, client_addr);
+		    NULL, client_addr);
 	}
 	_exit(i);
 }
@@ -2968,39 +2962,6 @@ sftp_server_usage(void)
 		"       %s -Q protocol_feature\n",
 		progname, progname);
 	exit(1);
-}
-
-/* static struct passwd * */
-/* pwcopy(struct passwd *pw) */
-/* { */
-/* 	struct passwd *copy = xcalloc(1, sizeof(*copy)); */
-
-/* 	copy->pw_name = xstrdup(pw->pw_name); */
-/* 	copy->pw_passwd = xstrdup(pw->pw_passwd); */
-/* #ifdef HAVE_STRUCT_PASSWD_PW_GECOS */
-/* 	copy->pw_gecos = xstrdup(pw->pw_gecos); */
-/* #endif */
-/* 	copy->pw_uid = pw->pw_uid; */
-/* 	copy->pw_gid = pw->pw_gid; */
-/* #ifdef HAVE_STRUCT_PASSWD_PW_EXPIRE */
-/* 	copy->pw_expire = pw->pw_expire; */
-/* #endif */
-/* #ifdef HAVE_STRUCT_PASSWD_PW_CHANGE */
-/* 	copy->pw_change = pw->pw_change; */
-/* #endif */
-/* #ifdef HAVE_STRUCT_PASSWD_PW_CLASS */
-/* 	copy->pw_class = xstrdup(pw->pw_class); */
-/* #endif */
-/* 	copy->pw_dir = xstrdup(pw->pw_dir); */
-/* 	copy->pw_shell = xstrdup(pw->pw_shell); */
-/* 	return copy; */
-/* } */
-
-static struct passwd *
-pwinit(void) {
-	struct passwd *pw = xcalloc(1, sizeof(*pw));
-	pw->pw_name = xstrdup("paco");
-	return pw;
 }
 
 static struct {
@@ -3148,8 +3109,6 @@ sftp_server_main(int argc, char **argv)
 
 	extern char *optarg;
 
-	pw = pwinit();
-
 	while (!skipargs && (ch = getopt(argc, argv,
 	    "d:f:l:P:p:Q:u:cehR")) != -1) {
 		switch (ch) {
@@ -3233,7 +3192,7 @@ sftp_server_main(int argc, char **argv)
         debug("client addr is %s", client_addr);
         
 	logit("session opened for local user %s from [%s]",
-	    pw->pw_name, client_addr);
+              NULL, client_addr);
 
 	in = GetStdHandle(STD_INPUT_HANDLE);
 	out = GetStdHandle(STD_OUTPUT_HANDLE);
