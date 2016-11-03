@@ -496,11 +496,14 @@ xwcscat(wchar_t *str, wchar_t *cat) {
 
 static wchar_t *
 xpathjoin(wchar_t *base, wchar_t *name) {
-        // network: \\foo\bar
-        if (name[0] == '\\' && name[1] == '\\')
-                return xwcsdup(name);
+        // network and other rare paths are forbidden: \\foo\bar, \\?\, \\.\, etc.
+        if (name[0] == '\\' && name[1] == '\\') {
+                debug3("xpathjoin(%ls, %ls) failed, \\... paths are forbidden", base, name);
+                SetLastError(ERROR_BAD_PATHNAME);
+                return NULL;
+        }
 
-        // volume: C:
+        // volume: C:...
         if (isalpha(name[0]) && name[1] == ':') {
                 // volume + absolute path
                 if (name[2] == '\0')
@@ -2764,19 +2767,11 @@ process_realpath(uint32_t id)
         wchar_t *sanepath = xpathjoin(NULL, path);
         debug3("sanepath: %ls", sanepath);
         if (sanepath) {
-                DWORD len = 100;
-                wchar_t *fullpath = NULL;
-                while (1) {
-                        fullpath = xreallocarray(fullpath, len, sizeof(wchar_t));
+                DWORD len = GetFullPathNameW(sanepath, 0, NULL, NULL);
+                if (len) {
+                        wchar_t *fullpath = xwcsalloc(len);
                         DWORD len1 = GetFullPathNameW(sanepath, len, fullpath, NULL);
-                        if (len1 > 0) {
-                                if (len1 >= len) {
-                                        len = len1 + 10;
-                                        continue;
-                                }
-
-                                debug3("GetFullPathNameW(%ls) -> %ls (%ld)", sanepath, fullpath, len1);
-                                
+                        if (len1 > 0 && len1 < len) {
                                 size_t len = GetLongPathNameW(fullpath, NULL, 0);
                                 if (len) {
                                         wchar_t *longpath = xwcsalloc(len);
@@ -2797,12 +2792,11 @@ process_realpath(uint32_t id)
                                         tell_error("GetLongPathNameW failed (1)");
                         }
                         else
-                                tell_error("GetFullPathNameW failed");
-
+                                tell_error("GetFullPathNameW failed (2)");
                         xfree(fullpath);
-
-                        break;
                 }
+                else
+                        tell_error("GetFullPathNameW failed (1)");
 
                 xfree(sanepath);
         }
