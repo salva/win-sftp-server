@@ -688,8 +688,8 @@ put_u32(void *vp, uint32_t v)
 	p[3] = (uint8_t)v & 0xff;
 }
 
-static int
-sshbuf_check_sanity(const struct sshbuf *buf)
+void
+sshbuf_assert_sanity(const struct sshbuf *buf)
 {
 	if (buf == NULL ||
 	    buf->d == NULL ||
@@ -700,7 +700,6 @@ sshbuf_check_sanity(const struct sshbuf *buf)
 		/* Do not try to recover from corrupted buffer internals */
 		fatal("Internal error: corrupted buffer at %p", buf);
 	}
-	return 0;
 }
 
 #define SSHBUF_SIZE_INIT 256		/* Initial allocation */
@@ -711,14 +710,10 @@ static struct sshbuf *
 sshbuf_new(void)
 {
 	struct sshbuf *ret;
-	if ((ret = xcalloc(sizeof(*ret), 1)) == NULL)
-		return NULL;
+	ret = xcalloc(sizeof(*ret), 1);
 	ret->alloc = SSHBUF_SIZE_INIT;
 	ret->max_size = SSHBUF_SIZE_MAX;
-	if ((ret->d = xcalloc(1, ret->alloc)) == NULL) {
-		xfree(ret);
-		return NULL;
-	}
+	ret->d = xcalloc(1, ret->alloc);
 	return ret;
 }
 
@@ -733,8 +728,8 @@ sshbuf_free(struct sshbuf *buf)
 	 * have been passed to us and continuing to scribble over memory would
 	 * be bad.
 	 */
-	if (sshbuf_check_sanity(buf) != 0)
-		return;
+	sshbuf_assert_sanity(buf);
+
 	/*
 	 * If we are a parent with still-extant children, then don't free just
 	 * yet. The last child's call to sshbuf_free should decrement our
@@ -747,29 +742,26 @@ sshbuf_free(struct sshbuf *buf)
 static size_t
 sshbuf_len(const struct sshbuf *buf)
 {
-	if (sshbuf_check_sanity(buf) != 0)
-		return 0;
+	sshbuf_assert_sanity(buf);
 	return buf->size - buf->off;
 }
 
 static const uint8_t *
 sshbuf_ptr(const struct sshbuf *buf)
 {
-	if (sshbuf_check_sanity(buf) != 0)
-		return NULL;
+        sshbuf_assert_sanity(buf);
 	return buf->d + buf->off;
 }
 
 static int
 sshbuf_check_reserve(const struct sshbuf *buf, size_t len)
 {
-	int r;
+	sshbuf_assert_sanity(buf);
 
-	if ((r = sshbuf_check_sanity(buf)) != 0)
-		return r;
-	/* Check that len is reasonable and that max_size + available < len */
-	if (len > buf->max_size || buf->max_size - len < buf->size - buf->off)
-		return SSH_ERR_NO_BUFFER_SPACE;
+        /* Check that len is reasonable and that max_size + available < len */
+        if (len <= buf->max_size && buf->max_size - len >= buf->size - buf->off)
+                return 1;
+        debug("no space in buffer!");
 	return 0;
 }
 
@@ -789,62 +781,51 @@ sshbuf_maybe_pack(struct sshbuf *buf, int force)
 static int
 sshbuf_reserve(struct sshbuf *buf, size_t len, uint8_t **dpp)
 {
-	size_t rlen, need;
-	uint8_t *dp;
-	int r;
-
 	if (dpp != NULL)
 		*dpp = NULL;
 
-	if ((r = sshbuf_check_reserve(buf, len)) != 0)
-		return r;
-	/*
-	 * If the requested allocation appended would push us past max_size
-	 * then pack the buffer, zeroing buf->off.
-	 */
-	sshbuf_maybe_pack(buf, buf->size + len > buf->max_size);
-	if (len + buf->size > buf->alloc) {
-		/*
-		 * Prefer to alloc in SSHBUF_SIZE_INC units, but
-		 * allocate less if doing so would overflow max_size.
-		 */
-		need = len + buf->size - buf->alloc;
-		rlen = ROUNDUP(buf->alloc + need, SSHBUF_SIZE_INC);
-		if (rlen > buf->max_size)
-			rlen = buf->alloc + need;
-		if ((dp = xrealloc(buf->d, rlen)) == NULL) {
-			if (dpp != NULL)
-				*dpp = NULL;
-			return SSH_ERR_ALLOC_FAIL;
-		}
-		buf->alloc = rlen;
-		buf->d = dp;
-		if ((r = sshbuf_check_reserve(buf, len)) < 0) {
-			/* shouldn't fail */
-			if (dpp != NULL)
-				*dpp = NULL;
-			return r;
-		}
-	}
-	dp = buf->d + buf->size;
-	buf->size += len;
-	if (dpp != NULL)
-		*dpp = dp;
-	return 0;
+	if (!sshbuf_check_reserve(buf, len))
+                return 0;
+        
+        /*
+         * If the requested allocation appended would push us past max_size
+         * then pack the buffer, zeroing buf->off.
+         */
+        sshbuf_maybe_pack(buf, buf->size + len > buf->max_size);
+        if (len + buf->size > buf->alloc) {
+                /*
+                 * Prefer to alloc in SSHBUF_SIZE_INC units, but
+                 * allocate less if doing so would overflow max_size.
+                 */
+                size_t need = len + buf->size - buf->alloc;
+                size_t rlen = ROUNDUP(buf->alloc + need, SSHBUF_SIZE_INC);
+                if (rlen > buf->max_size)
+                        rlen = buf->alloc + need;
+                buf->d = xrealloc(buf->d, rlen);
+                buf->alloc = rlen;
+                if (!sshbuf_check_reserve(buf, len))
+                        fatal("internal error: reallocated buffer is too small! should never happen!!!");
+        }
+
+        if (dpp != NULL)
+                *dpp = buf->d + buf->size;
+        buf->size += len;
+        return 1;
 }
 
-int
+static int
 sshbuf_consume(struct sshbuf *buf, size_t len)
 {
-	int r;
-	if ((r = sshbuf_check_sanity(buf)) != 0)
-		return r;
-	if (len == 0)
-		return 0;
-	if (len > sshbuf_len(buf))
-		return SSH_ERR_MESSAGE_INCOMPLETE;
+	sshbuf_assert_sanity(buf);
+
+	if (len > sshbuf_len(buf)) {
+                SetLastError(ERROR_INVALID_DATA);
+                debug3("not enough data in buffer for consume %d", len);
+                return 0;
+        }
+
 	buf->off += len;
-	return 0;
+        return 1;
 }
 
 
@@ -853,34 +834,30 @@ static int
 sshbuf_peek_string_direct(const struct sshbuf *buf, const uint8_t **valp,
 			  size_t *lenp)
 {
-	uint32_t len;
-	const uint8_t *p = sshbuf_ptr(buf);
-
-	if (valp != NULL)
-		*valp = NULL;
-	if (lenp != NULL)
-		*lenp = 0;
+	if (valp) *valp = NULL;
+	if (lenp) *lenp = 0;
+        
 	if (sshbuf_len(buf) < 4) {
 		debug3("sshbuf: message incomplete, len: %d", sshbuf_len(buf));
                 SetLastError(ERROR_INVALID_DATA);
-		return SSH_ERR_MESSAGE_INCOMPLETE;
+                return 0;
 	}
-	len = PEEK_U32(p);
+
+	const uint8_t *p = sshbuf_ptr(buf);
+	uint32_t len = PEEK_U32(p);
 	if (len > SSHBUF_SIZE_MAX - 4) {
 		debug3("sshbuf: string too large, len: %d", len);
                 SetLastError(ERROR_INVALID_DATA);
-		return SSH_ERR_STRING_TOO_LARGE;
+                return 0;
 	}
 	if (sshbuf_len(buf) - 4 < len) {
 		debug3("sshbuf: message incomplete, len: %d, buffer len: %d", len, sshbuf_len(buf));
                 SetLastError(ERROR_INVALID_DATA);
-		return SSH_ERR_MESSAGE_INCOMPLETE;
+                return 0;
 	}
-	if (valp != NULL)
-		*valp = p + 4;
-	if (lenp != NULL)
-		*lenp = len;
-	return 0;
+	if (valp) *valp = p + 4;
+	if (lenp) *lenp = len;
+	return 1;
 }
 
 #define sshbuf_skip_string(buf) sshbuf_get_string_direct(buf, NULL, NULL)
@@ -890,22 +867,17 @@ sshbuf_get_string_direct(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
 {
 	uint32_t len;
 	const uint8_t *p;
-	int r;
-
-	if (valp != NULL)
-		*valp = NULL;
-	if (lenp != NULL)
-		*lenp = 0;
-	if ((r = sshbuf_peek_string_direct(buf, &p, &len)) < 0)
-		return r;
-	if (valp != NULL)
-		*valp = p;
-	if (lenp != NULL)
-		*lenp = len;
-	if (sshbuf_consume(buf, len + 4) != 0) {
-		fatal("sshbuf: internal error, sshbuf_consume failed");
+	if (sshbuf_peek_string_direct(buf, &p, &len)) {
+                if (sshbuf_consume(buf, len + 4)) {
+                        if (valp) *valp = p;
+                        if (lenp) *lenp = len;
+                        return 1;
+                }
+                fatal("sshbuf: internal error, sshbuf_consume failed");
 	}
-	return 0;
+        if (valp) *valp = NULL;
+	if (lenp) *lenp = 0;
+        return 0;
 }
 
 static int
@@ -913,22 +885,18 @@ sshbuf_get_string(struct sshbuf *buf, uint8_t **valp, size_t *lenp)
 {
 	const uint8_t *val;
 	size_t len;
-	int r;
+	if (sshbuf_get_string_direct(buf, &val, &len)) {
+                if (valp) {
+                        *valp = xmalloc(len + 1);
+                        if (len) memcpy(*valp, val, len);
+                        (*valp)[len] = '\0';
+                }
+                if (lenp) *lenp = len;
+                return 1;
+        }
+        if (valp) *valp = NULL;
+	if (lenp) *lenp = 0;
 
-	if (valp != NULL)
-		*valp = NULL;
-	if (lenp != NULL)
-		*lenp = 0;
-	if ((r = sshbuf_get_string_direct(buf, &val, &len)) < 0)
-		return r;
-	if (valp != NULL) {
-		*valp = xmalloc(len + 1);
-		if (len != 0)
-			memcpy(*valp, val, len);
-		(*valp)[len] = '\0';
-	}
-	if (lenp != NULL)
-		*lenp = len;
 	return 0;
 }
 
@@ -936,22 +904,18 @@ static int
 sshbuf_peek_cstring(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
 {
 	size_t len;
-	const uint8_t *p, *z;
-	int r;
-
-	if (valp != NULL)
-		*valp = NULL;
-	if (lenp != NULL)
-		*lenp = 0;
-	if ((r = sshbuf_peek_string_direct(buf, &p, &len)) != 0)
-		return r;
-	/* Allow a \0 only at the end of the string */
-	if (len > 0 &&
-	    (z = memchr(p , '\0', len)) != NULL && z < p + len - 1) {
-		return SSH_ERR_INVALID_FORMAT;
+	const uint8_t *p;
+	if (sshbuf_peek_string_direct(buf, &p, &len)) {
+                /* Allow a \0 only at the end of the string */
+                if (len == 0 || !memchr(p , '\0', len - 1)) {
+                        if (valp) *valp = p;
+                        if (lenp) *lenp = len;
+                        return 1;
+                }
+                SetLastError(ERROR_INVALID_DATA);
 	}
-	if (valp) *valp = p;
-	if (lenp) *lenp = len;
+	if (valp) *valp = NULL;
+	if (lenp) *lenp = 0;
 	return 0;
 }
 
@@ -960,51 +924,37 @@ sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
 {
 	size_t len;
 	const uint8_t *p;
-	int r;
-
-	if (valp != NULL)
-		*valp = NULL;
-	if (lenp != NULL)
-		*lenp = 0;
-	if ((r = sshbuf_peek_cstring(buf, &p, &len)) != 0)
-		return r;
-
-	if ((r = sshbuf_skip_string(buf)) != 0)
-		return -1;
-
-	if (valp != NULL) {
-		*valp = xmalloc(len + 1);
-		if (len != 0)
-			memcpy(*valp, p, len);
-		(*valp)[len] = '\0';
-	}
-	if (lenp != NULL)
-		*lenp = len;
+        if (sshbuf_peek_cstring(buf, &p, &len) &&
+            sshbuf_skip_string(buf)) {
+                if (valp) {
+                        *valp = xmalloc(len + 1);
+                        if (len) memcpy(*valp, p, len);
+                        (*valp)[len] = '\0';
+                }
+                if (lenp) *lenp = len;
+                return 1;
+        }
+	if (valp) *valp = NULL;
+	if (lenp) *lenp = 0;
 	return 0;
 }
 
 static int
 sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
 {
-	if (valp != NULL)
-		*valp = NULL;
-
         append_bar = (append_bar ? 1 : 0);
+
+        if (valp) *valp = NULL;
         
         size_t len;
         const uint8_t *p;
-	int r;
+	if (!sshbuf_peek_string_direct(buf, &p, &len) ||
+            !sshbuf_skip_string(buf))
+                return 0;
+        
         static const uint8_t forbidden_path_chr[] = "<>:\"|?*";
         static const uint8_t current_dir[] = ".";
-        
-
-	if ((r = sshbuf_peek_cstring(buf, &p, &len)) != 0)
-		return r;
-
-	if ((r = sshbuf_skip_string(buf)) != 0)
-		return -1;
-
-        int skip_vol = 0;
+                
         if (len == 0) {
                 debug("zero length path given, taken as '.'");
                 p = current_dir;
@@ -1014,23 +964,24 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                 if (len >= 2 && p[0] == '\\' && p[1] == '\\') {
                         debug3("sshbud_get_path failed, \\\\... paths are forbidden");
                         SetLastError(ERROR_BAD_PATHNAME);
-                        return SSH_ERR_BAD_PATHNAME;
+                        return 0;
                 }
 
-                int i;
                 // convert '\\' to '/'
+                int i;
                 for (i = 0; i < len; i++) {
                         // just override the const qualifier
                         if (p[i] == '\\') ((uint8_t *)p)[i] = '/';
                 }
 
+                int skip_vol = 0;
                 if (len >= 2 && isalpha(p[0]) && p[1] == ':') {
                         if (len == 2 || p[2] != '/') {
                                 // TODO: use GetFullPathName() to resolve the path
                                 debug3("sshbuf_get_path (%*s) failed, relative paths after a volume name are fobidden",
                                        len, p);
                                 SetLastError(ERROR_BAD_PATHNAME);
-                                return SSH_ERR_BAD_PATHNAME;
+                                return 0;
                         }
                         skip_vol = 2;
                 }
@@ -1039,7 +990,7 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                         if (memchr(forbidden_path_chr, p[i], sizeof(forbidden_path_chr))) {
                                 debug3("sshbuf_get_path failed, character %c (0x%2x) is forbidden in path names", p[i], p[i]);
                                 SetLastError(ERROR_BAD_PATHNAME);
-                                return SSH_ERR_BAD_PATHNAME;
+                                return 0;
                         }
                 }
 
@@ -1052,49 +1003,43 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                 if (p[i] == '/') append_bar = 0;
         }
 
-        int wlen;
-        if ((wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                        (const char *)p, len, NULL, 0)) != 0) {
-                if (valp) {
-                        *valp = xwcsalloc(wlen + append_bar + 1);
-                        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                                (const char *)p, len, *valp, wlen) == wlen) {
-                                if (append_bar) {
-                                        (*valp)[wlen] = '/';
-                                        (*valp)[wlen + 1] = 0;
-                                }
-                                else
-                                        (*valp)[wlen] = 0;
+        int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                       (const char *)p, len, NULL, 0);
+        if (!wlen) {
+                tell_error("MultiByteToWideChar failed");
+                return 0;
+        }
+
+        if (valp) {
+                *valp = xwcsalloc(wlen + append_bar + 1);
+                if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        (const char *)p, len, *valp, wlen) == wlen) {
+                        if (append_bar) {
+                                (*valp)[wlen] = '/';
+                                (*valp)[wlen + 1] = 0;
                         }
-                        else {
-                                tell_error("MultibyteToWideChar failed");
-                                xfree(*valp);
-                                *valp = NULL;
-                                return SSH_ERR_INVALID_FORMAT;
-                        }
+                        else
+                                (*valp)[wlen] = 0;
+                }
+                else {
+                        tell_error("MultibyteToWideChar failed");
+                        xfree(*valp);
+                        *valp = NULL;
+                        return 0;
                 }
         }
-        else {
-                tell_error("MultiByteToWideChar failed");
-                return SSH_ERR_INVALID_FORMAT;
-        }
-        
-	if (valp && *valp)
-		debug3("get_path: %ls", *valp);
 
-	return  0;
+	return  1;
 }
 
 static int
 sshbuf_get(struct sshbuf *buf, void *v, size_t len)
 {
 	const uint8_t *p = sshbuf_ptr(buf);
-	int r;
-
-	if ((r = sshbuf_consume(buf, len)) < 0)
-		return r;
-	if (v != NULL && len != 0)
-		memcpy(v, p, len);
+	if (sshbuf_consume(buf, len)) {
+                if (v && len) memcpy(v, p, len);
+                return 1;
+        }
 	return 0;
 }
 
@@ -1102,12 +1047,10 @@ static int
 sshbuf_get_u64(struct sshbuf *buf, uint64_t *valp)
 {
 	const uint8_t *p = sshbuf_ptr(buf);
-	int r;
-
-	if ((r = sshbuf_consume(buf, 8)) < 0)
-		return r;
-	if (valp != NULL)
-		*valp = PEEK_U64(p);
+	if (sshbuf_consume(buf, 8)) {
+                if (valp) *valp = PEEK_U64(p);
+                return 1;
+        }
 	return 0;
 }
 
@@ -1115,45 +1058,21 @@ static int
 sshbuf_get_u32(struct sshbuf *buf, uint32_t *valp)
 {
 	const uint8_t *p = sshbuf_ptr(buf);
-	int r;
-
-	if ((r = sshbuf_consume(buf, 4)) < 0)
-		return r;
-	if (valp != NULL)
-		*valp = PEEK_U32(p);
-	return 0;
+	if (sshbuf_consume(buf, 4)) {
+                if (valp) *valp = PEEK_U32(p);
+                return 1;
+        }
+        return 0;
 }
 
 static int
 sshbuf_get_u8(struct sshbuf *buf, uint8_t *valp)
 {
 	const uint8_t *p = sshbuf_ptr(buf);
-	int r;
-
-	if ((r = sshbuf_consume(buf, 1)) < 0)
-		return r;
-	if (valp != NULL)
-		*valp = (uint8_t)*p;
-	return 0;
-}
-
- int
-sshbuf_get_stringb(struct sshbuf *buf, struct sshbuf *v)
-{
-	uint32_t len;
-	uint8_t *p;
-	int r;
-
-	/*
-	 * Use sshbuf_peek_string_direct() to figure out if there is
-	 * a complete string in 'buf' and copy the string directly
-	 * into 'v'.
-	 */
-	if ((r = sshbuf_peek_string_direct(buf, NULL, NULL)) != 0 ||
-	    (r = sshbuf_get_u32(buf, &len)) != 0 ||
-	    (r = sshbuf_reserve(v, len, &p)) != 0 ||
-	    (r = sshbuf_get(buf, p, len)) != 0)
-		return r;
+	if (sshbuf_consume(buf, 1)) {
+                if (valp) *valp = (uint8_t)*p;
+                return 1;
+        }
 	return 0;
 }
 
@@ -1161,23 +1080,21 @@ static int
 sshbuf_put_u64(struct sshbuf *buf, uint64_t val)
 {
 	uint8_t *p;
-	int r;
-
-	if ((r = sshbuf_reserve(buf, 8, &p)) < 0)
-		return r;
-	POKE_U64(p, val);
-	return 0;
+	if (sshbuf_reserve(buf, 8, &p)) {
+                POKE_U64(p, val);
+                return 1;
+        }
+        return 0;
 }
 
 static int
 sshbuf_put_u32(struct sshbuf *buf, uint32_t val)
 {
 	uint8_t *p;
-	int r;
-
-	if ((r = sshbuf_reserve(buf, 4, &p)) < 0)
-		return r;
-	POKE_U32(p, val);
+	if (sshbuf_reserve(buf, 4, &p)) {
+                POKE_U32(p, val);
+                return 1;
+        }
 	return 0;
 }
 
@@ -1185,28 +1102,25 @@ static int
 sshbuf_put_u8(struct sshbuf *buf, uint8_t val)
 {
 	uint8_t *p;
-	int r;
-
-	if ((r = sshbuf_reserve(buf, 1, &p)) < 0)
-		return r;
-	p[0] = val;
+	if (sshbuf_reserve(buf, 1, &p)) {
+                p[0] = val;
+                return 1;
+        }
 	return 0;
 }
 
 static int
 sshbuf_put_string(struct sshbuf *buf, const void *v, size_t len)
 {
-	uint8_t *d;
-	int r;
+	if (len > SSHBUF_SIZE_MAX - 4)
+                fatal("no space left in buffer");
 
-	if (len > SSHBUF_SIZE_MAX - 4) {
-		return SSH_ERR_NO_BUFFER_SPACE;
-	}
-	if ((r = sshbuf_reserve(buf, len + 4, &d)) < 0)
-		return r;
-	POKE_U32(d, len);
-	if (len != 0)
-		memcpy(d + 4, v, len);
+	uint8_t *d;
+	if (sshbuf_reserve(buf, len + 4, &d)) {
+                POKE_U32(d, len);
+                if (len) memcpy(d + 4, v, len);
+                return 1;
+        }
 	return 0;
 }
 
@@ -1217,34 +1131,25 @@ sshbuf_put_string(struct sshbuf *buf, const void *v, size_t len)
 static int
 sshbuf_put_wcs(struct sshbuf *buf, const wchar_t *v, size_t wlen)
 {
-	uint8_t *d;
-	int r;
+	if (!wlen) return sshbuf_put_string(buf, "", 0);
+                
+        size_t alen = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
+                                          NULL, 0, NULL, NULL);
+        if (alen) {
+                uint8_t *d;
+                if ((alen <= SSHBUF_SIZE_MAX - 4) &&
+                    sshbuf_reserve(buf, alen + 4, &d)) {
+                        POKE_U32(d, alen);
+                        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
+                                                (char *)d + 4, alen, NULL, NULL) == alen)
+                                return 1;
 
-	if (wlen) {
-            size_t alen = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
-						  NULL, 0, NULL, NULL);
-		if (alen) {
-			if (alen > SSHBUF_SIZE_MAX - 4) {
-				return SSH_ERR_NO_BUFFER_SPACE;
-			}
-			if ((r = sshbuf_reserve(buf, alen + 4, &d)) < 0)
-				return r;
-			POKE_U32(d, alen);
-			if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
-						(char *)d + 4, alen, NULL, NULL) == alen)
-				return 0;
-			else {
-				tell_error("WideCharToMultiByte failed (2)");
-				return SSH_ERR_NO_BUFFER_SPACE;
-			}
-		}
-		else {
-			tell_error("WideCharToMultiByte failed (1)");
-			return SSH_ERR_NO_BUFFER_SPACE;
-		}
-	}
-	else
-		return sshbuf_put_string(buf, "", 0);
+                        tell_error("WideCharToMultiByte failed (2)");
+                }
+                else debug3("buffer is to slow, wlen: %ld, alen: %ld", wlen, alen);
+        }
+        else tell_error("WideCharToMultiByte failed (1)");
+        return 0;
 }
 
 static int
@@ -1269,27 +1174,23 @@ static int
 sshbuf_put(struct sshbuf *buf, const void *v, size_t len)
 {
 	uint8_t *p;
-	int r;
-
-	if ((r = sshbuf_reserve(buf, len, &p)) < 0)
-		return r;
-	if (len != 0)
-		memcpy(p, v, len);
+	if (sshbuf_reserve(buf, len, &p)) {
+                if (len) memcpy(p, v, len);
+                return 1;
+        }
 	return 0;
 }
 
 static void
 sshbuf_reset(struct sshbuf *buf)
 {
-	uint8_t *d;
-	if (sshbuf_check_sanity(buf) == 0)
-		memset(buf->d, 0, buf->alloc);
+	sshbuf_assert_sanity(buf);
+
+        memset(buf->d, 0, buf->alloc);
 	buf->off = buf->size = 0;
 	if (buf->alloc != SSHBUF_SIZE_INIT) {
-		if ((d = xrealloc(buf->d, SSHBUF_SIZE_INIT)) != NULL) {
-			buf->d = d;
-			buf->alloc = SSHBUF_SIZE_INIT;
-		}
+		buf->d = xrealloc(buf->d, SSHBUF_SIZE_INIT);
+                buf->alloc = SSHBUF_SIZE_INIT;
 	}
 }
 
@@ -1342,68 +1243,13 @@ last_error_to_portable(void)
 	case ERROR_NOT_SUPPORTED:
 		return SSH2_FX_OP_UNSUPPORTED;
 
+        case ERROR_INVALID_DATA:
+                return SSH2_FX_BAD_MESSAGE;
+
 	default:
 		return SSH2_FX_FAILURE;
 	}
 }
-
-/* static int */
-/* errno_to_portable(int unixerrno) */
-/* { */
-/* 	int ret = 0; */
-
-/* 	switch (unixerrno) { */
-/* 	case 0: */
-/* 		ret = SSH2_FX_OK; */
-/* 		break; */
-/* 	case ENOENT: */
-/* 	case ENOTDIR: */
-/* 	case EBADF: */
-/* 	case ELOOP: */
-/* 		ret = SSH2_FX_NO_SUCH_FILE; */
-/* 		break; */
-/* 	case EPERM: */
-/* 	case EACCES: */
-/* 	case EFAULT: */
-/* 		ret = SSH2_FX_PERMISSION_DENIED; */
-/* 		break; */
-/* 	case ENAMETOOLONG: */
-/* 	case EINVAL: */
-/* 		ret = SSH2_FX_BAD_MESSAGE; */
-/* 		break; */
-/* 	case ENOSYS: */
-/* 		ret = SSH2_FX_OP_UNSUPPORTED; */
-/* 		break; */
-/* 	default: */
-/* 		ret = SSH2_FX_FAILURE; */
-/* 		break; */
-/* 	} */
-/* 	return ret; */
-/* } */
-
-/* static int */
-/* flags_from_portable(int pflags) */
-/* { */
-/* 	int flags = 0; */
-
-/* 	if ((pflags & SSH2_FXF_READ) && */
-/* 	    (pflags & SSH2_FXF_WRITE)) { */
-/* 		flags = O_RDWR; */
-/* 	} else if (pflags & SSH2_FXF_READ) { */
-/* 		flags = O_RDONLY; */
-/* 	} else if (pflags & SSH2_FXF_WRITE) { */
-/* 		flags = O_WRONLY; */
-/* 	} */
-/* 	if (pflags & SSH2_FXF_APPEND) */
-/* 		flags |= O_APPEND; */
-/* 	if (pflags & SSH2_FXF_CREAT) */
-/* 		flags |= O_CREAT; */
-/* 	if (pflags & SSH2_FXF_TRUNC) */
-/* 		flags |= O_TRUNC; */
-/* 	if (pflags & SSH2_FXF_EXCL) */
-/* 		flags |= O_EXCL; */
-/* 	return flags; */
-/* } */
 
 /* handle handles */
 
@@ -1413,7 +1259,6 @@ struct Handle {
 	HANDLE fd;
 	int flags;
 	wchar_t *name;
-	uint64_t bytes_read, bytes_write;
 	int next_unused;
         wchar_t *dir_start;
 };
@@ -1443,30 +1288,23 @@ win_time_to_posix(FILETIME ft) {
 }
 
 static int
-w_utimes(wchar_t *name, uint32_t mtime, uint32_t atime)
-{
+w_utimes(wchar_t *name, uint32_t mtime, uint32_t atime) {
 
 	FILETIME wmtime = posix_time_to_win(mtime);
 	FILETIME watime = posix_time_to_win(atime);
 
-	int rc = 0;
 	HANDLE h = CreateFileW(name, FILE_WRITE_ATTRIBUTES, 0,
 			       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
-	if (h == INVALID_HANDLE_VALUE)
-		rc = -1;
-	else {
-		if (!SetFileTime(h, &wmtime, &watime, &wmtime))
-			rc = -1;
-		if (!CloseHandle(h))
-			rc = -1;
-	}
-	return rc;
+	if (h != INVALID_HANDLE_VALUE &&
+            SetFileTime(h, &wmtime, &watime, &wmtime) &&
+            CloseHandle(h))
+                return 1;
+        return 0;
 }
 
 static void
-attrib_clear(Attrib *a)
-{
+attrib_clear(Attrib *a) {
 	a->flags = 0;
 	a->size = 0;
 	a->uid = 0;
@@ -1531,18 +1369,15 @@ file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a, const wchar_t *
 
 static int
 GetFileInformationW(wchar_t *name, BY_HANDLE_FILE_INFORMATION *file_info) {
-	int rc = 0;
 	HANDLE h = CreateFileW(name,
 			       FILE_READ_ATTRIBUTES,
 			       FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
 			       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        if (h == INVALID_HANDLE_VALUE)
-                tell_error("CreateFile failed");
-        else {
-                rc = GetFileInformationByHandle(h, file_info);
-                CloseHandle(h);
-	}
-	return rc;
+        if ((h != INVALID_HANDLE_VALUE) &&
+            GetFileInformationByHandle(h, file_info) &&
+            CloseHandle(h))
+                return 1;
+	return 0;
 }
 
 static int
@@ -1587,7 +1422,6 @@ handle_new(int use, const wchar_t *name, HANDLE fd, int flags, wchar_t *dir_star
 	handles[i].fd = fd;
 	handles[i].flags = flags;
 	handles[i].name = xwcsdup(name);
-	handles[i].bytes_read = handles[i].bytes_write = 0;
         handles[i].dir_start = (dir_start ? xwcsdup(dir_start) : NULL);
 	return i;
 }
@@ -1616,33 +1450,29 @@ handle_to_cached_dir_start_and_reset(int i) {
 	return start;
 }
 
-static int
-handle_to_string(int handle, uint8_t **stringp, int *hlenp)
-{
-	if (stringp == NULL || hlenp == NULL)
-		return -1;
-	*stringp = xmalloc(sizeof(int32_t));
-	put_u32(*stringp, handle);
-	*hlenp = sizeof(int32_t);
-	return 0;
+static void
+handle_to_string(int hix, uint8_t **stringp, int *hlenp) {
+        if (stringp) {
+                *stringp = xmalloc(sizeof(int32_t));
+                put_u32(*stringp, hix);
+        }
+        if (hlenp) *hlenp = sizeof(int32_t);
 }
 
 static int
-handle_from_string(const uint8_t *handle, uint hlen)
-{
-	int val;
-
-	if (hlen != sizeof(int32_t))
-		return -1;
-	val = get_u32(handle);
-	if (handle_is_ok(val, HANDLE_FILE|HANDLE_DIR))
-		return val;
-	return -1;
+handle_from_string(const uint8_t *handle, uint hlen, int *hix) {
+	if (hlen == sizeof(int32_t)) {
+                int val = get_u32(handle);
+                if (handle_is_ok(val, HANDLE_FILE|HANDLE_DIR)) {
+                        if (hix) *hix = val;
+                        return 1;
+                }
+        }
+        return 0;
 }
 
 static wchar_t *
-handle_to_name(int handle)
-{
+handle_to_name(int handle) {
 	if (handle_is_ok(handle, HANDLE_FILE|HANDLE_DIR))
 		return handles[handle].name;
 	return NULL;
@@ -1655,69 +1485,19 @@ handle_to_win_handle(int handle) {
         return NULL;
 }
 
-static HANDLE
-handle_to_win_dir_handle(int handle)
-{
-	if (handle_is_ok(handle, HANDLE_DIR))
-		return handles[handle].fd;
-	return INVALID_HANDLE_VALUE;
-}
-
-static HANDLE
-handle_to_win_file_handle(int handle)
-{
-	if (handle_is_ok(handle, HANDLE_FILE))
-		return handles[handle].fd;
-	return INVALID_HANDLE_VALUE;
-}
-
 static int
-handle_to_flags(int handle)
-{
+handle_to_flags(int handle) {
 	if (handle_is_ok(handle, HANDLE_FILE))
 		return handles[handle].flags;
 	return 0;
 }
 
 static void
-handle_update_read(int handle, ssize_t bytes)
-{
-	if (handle_is_ok(handle, HANDLE_FILE) && bytes > 0)
-		handles[handle].bytes_read += bytes;
-}
-
-static void
-handle_update_write(int handle, ssize_t bytes)
-{
-	if (handle_is_ok(handle, HANDLE_FILE) && bytes > 0)
-		handles[handle].bytes_write += bytes;
-}
-
-static uint64_t
-handle_bytes_read(int handle)
-{
-	if (handle_is_ok(handle, HANDLE_FILE))
-		return (handles[handle].bytes_read);
-	return 0;
-}
-
-static uint64_t
-handle_bytes_write(int handle)
-{
-	if (handle_is_ok(handle, HANDLE_FILE))
-		return (handles[handle].bytes_write);
-	return 0;
-}
-
-static void
-handle_log_close(int handle, char *emsg)
-{
+handle_log_close(int handle, char *emsg) {
 	if (handle_is_ok(handle, HANDLE_FILE)) {
-		logit("%s%sclose \"%s\" bytes read %llu written %llu",
-		    emsg == NULL ? "" : emsg, emsg == NULL ? "" : " ",
-		    handle_to_name(handle),
-		    (unsigned long long)handle_bytes_read(handle),
-		    (unsigned long long)handle_bytes_write(handle));
+		logit("%s%sclose \"%s\"",
+                      emsg == NULL ? "" : emsg, emsg == NULL ? "" : " ",
+                      handle_to_name(handle));
 	} else {
 		logit("%s%sclosedir \"%s\"",
 		    emsg == NULL ? "" : emsg, emsg == NULL ? "" : " ",
@@ -1726,59 +1506,42 @@ handle_log_close(int handle, char *emsg)
 }
 
 static int
-get_handle(struct sshbuf *queue, int *hp)
-{
-	uint8_t *handle;
-	int r;
+get_handle(struct sshbuf *queue, int type, int *hixp) {
+	const uint8_t *handle;
 	size_t hlen;
-
-	*hp = -1;
-	if ((r = sshbuf_get_string(queue, &handle, &hlen)) != 0)
-		return r;
-	if (hlen < 256) {
-		*hp = handle_from_string(handle, hlen);
-                xfree(handle);
-                return 0;
+        if (sshbuf_peek_string_direct(queue, &handle, &hlen)) {
+                int hix;
+                if (sshbuf_skip_string(queue) &&
+                    handle_from_string(handle, hlen, &hix)) {
+                        if (handle_is_ok(hix, type)) {
+                                if (hixp) *hixp = hix;
+                                return 1;
+                        }
+                }
         }
         
         SetLastError(ERROR_INVALID_DATA);
-        xfree(handle);
-        return -1;
-}
-
-static int
-get_handle_ix(struct sshbuf *queue, int type, int *hix) {
-        if (get_handle(queue, hix) == 0) {
-                if (handle_is_ok(*hix, type))
-                        return 0;
-        }
-        *hix = -1;
-        return -1;        
+        if (hixp) *hixp = -1;
+        return 0;
 }
 
 static int
 get_win_handle(struct sshbuf *queue, int type, HANDLE *hp) {
         int hix;
-        if (get_handle(queue, &hix) == 0) {
-                if (handle_is_ok(hix, type)) {
-                        *hp = handles[hix].fd;
-                        return 1;
-                }
+        if (get_handle(queue, type, &hix)) {
+                if (hp) *hp = handles[hix].fd;
+                return 1;
         }
-        SetLastError(ERROR_INVALID_HANDLE);
         return 0;
 }
 
 /* send replies */
 
 static void
-send_msg(struct sshbuf *m)
-{
-	int r;
-
-	if ((r = sshbuf_put_stringb(oqueue, m)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-	sshbuf_reset(m);
+send_msg(struct sshbuf *m) {
+	if (!sshbuf_put_stringb(oqueue, m))
+		fatal("%s: buffer error", __func__);                
+        sshbuf_reset(m);
 }
 
 static const char *
@@ -1800,28 +1563,17 @@ status_to_message(uint32_t status)
 }
 
 static void
-send_status(uint32_t id, uint32_t status)
-{
-	struct sshbuf *msg;
-	int r;
-
+send_status(uint32_t id, uint32_t status) {
 	debug3("request %u: sent status %u", id, status);
-	if (log_level > LOG_LEVEL_VERBOSE ||
-	    (status != SSH2_FX_OK && status != SSH2_FX_EOF))
-		logit("sent status %s", status_to_message(status));
-	if ((msg = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
-	if ((r = sshbuf_put_u8(msg, SSH2_FXP_STATUS)) != 0 ||
-	    (r = sshbuf_put_u32(msg, id)) != 0 ||
-	    (r = sshbuf_put_u32(msg, status)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-	if (version >= 3) {
-		if ((r = sshbuf_put_cstring(msg,
-		    status_to_message(status))) != 0 ||
-		    (r = sshbuf_put_cstring(msg, "")) != 0)
-			fatal("%s: buffer error: %d", __func__, r);
-	}
-	send_msg(msg);
+        
+	struct sshbuf *msg = sshbuf_new();
+	if (sshbuf_put_u8(msg, SSH2_FXP_STATUS) &&
+	    sshbuf_put_u32(msg, id) &&
+	    sshbuf_put_u32(msg, status) &&
+            sshbuf_put_cstring(msg, status_to_message(status)))
+                send_msg(msg);
+        else fatal("%s: buffer error", __func__);
+
 	sshbuf_free(msg);
 }
 
@@ -1831,18 +1583,14 @@ send_ok(int id, int ok) {
 }
 
 static void
-send_data_or_handle(char type, uint32_t id, const uint8_t *data, int dlen)
-{
-	struct sshbuf *msg;
-	int r;
+send_data_or_handle(char type, uint32_t id, const uint8_t *data, int dlen) {
+	struct sshbuf *msg = sshbuf_new();
+	if (sshbuf_put_u8(msg, type) &&
+	    sshbuf_put_u32(msg, id) && 
+            sshbuf_put_string(msg, data, dlen))
+                send_msg(msg);
+        else fatal("%s: buffer error", __func__);
 
-	if ((msg = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
-	if ((r = sshbuf_put_u8(msg, type)) != 0 ||
-	    (r = sshbuf_put_u32(msg, id)) != 0 ||
-	    (r = sshbuf_put_string(msg, data, dlen)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-	send_msg(msg);
 	sshbuf_free(msg);
 }
 
@@ -1868,98 +1616,102 @@ send_handle(uint32_t id, int handle)
 static int
 encode_attrib(struct sshbuf *b, const Attrib *a)
 {
-	int r;
+	if (!sshbuf_put_u32(b, a->flags))
+                return 0;
+        
+        if (a->flags & SSH2_FILEXFER_ATTR_SIZE) {
+                if (!sshbuf_put_u64(b, a->size))
+                        return 0;
+        }
 
-	if ((r = sshbuf_put_u32(b, a->flags)) != 0)
-		return r;
-	if (a->flags & SSH2_FILEXFER_ATTR_SIZE) {
-		if ((r = sshbuf_put_u64(b, a->size)) != 0)
-			return r;
+        if (a->flags & SSH2_FILEXFER_ATTR_UIDGID) {
+                if (!sshbuf_put_u32(b, a->uid) ||
+                    !sshbuf_put_u32(b, a->gid))
+                        return 0;
+        }
+        
+        if (a->flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
+		if (!sshbuf_put_u32(b, a->perm))
+			return 0;
 	}
-	if (a->flags & SSH2_FILEXFER_ATTR_UIDGID) {
-		if ((r = sshbuf_put_u32(b, a->uid)) != 0 ||
-		    (r = sshbuf_put_u32(b, a->gid)) != 0)
-			return r;
-	}
-	if (a->flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-		if ((r = sshbuf_put_u32(b, a->perm)) != 0)
-			return r;
-	}
+
 	if (a->flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
-		if ((r = sshbuf_put_u32(b, a->atime)) != 0 ||
-		    (r = sshbuf_put_u32(b, a->mtime)) != 0)
-			return r;
+		if (!sshbuf_put_u32(b, a->atime) ||
+		    !sshbuf_put_u32(b, a->mtime))
+			return 0;
 	}
-	return 0;
+	return 1;
 }
 
 static int
 decode_attrib(struct sshbuf *b, Attrib *a)
 {
-	int r;
-
 	attrib_clear(a);
-	if ((r = sshbuf_get_u32(b, &a->flags)) != 0)
-		return r;
-	if (a->flags & SSH2_FILEXFER_ATTR_SIZE) {
-		if ((r = sshbuf_get_u64(b, &a->size)) != 0)
-			return r;
-	}
-	if (a->flags & SSH2_FILEXFER_ATTR_UIDGID) {
-		if ((r = sshbuf_get_u32(b, &a->uid)) != 0 ||
-		    (r = sshbuf_get_u32(b, &a->gid)) != 0)
-			return r;
-	}
-	if (a->flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-		if ((r = sshbuf_get_u32(b, &a->perm)) != 0)
-			return r;
-	}
-	if (a->flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
-		if ((r = sshbuf_get_u32(b, &a->atime)) != 0 ||
-		    (r = sshbuf_get_u32(b, &a->mtime)) != 0)
-			return r;
-	}
-	/* vendor-specific extensions */
-	if (a->flags & SSH2_FILEXFER_ATTR_EXTENDED) {
-		char *type;
-		uint8_t *data;
-		size_t dlen;
-		uint i, count;
+	if (!sshbuf_get_u32(b, &a->flags))
+                return 0;
 
-		if ((r = sshbuf_get_u32(b, &count)) != 0)
-			fatal("%s: buffer error: %d", __func__, r);
-		for (i = 0; i < count; i++) {
-			if ((r = sshbuf_get_cstring(b, &type, NULL)) != 0 ||
-			    (r = sshbuf_get_string(b, &data, &dlen)) != 0)
-				return r;
-			debug3("Got file attribute \"%.100s\" len %zu",
-			    type, dlen);
-			xfree(type);
-			xfree(data);
-		}
-	}
-	return 0;
+        if (a->flags & SSH2_FILEXFER_ATTR_SIZE) {
+                if (!sshbuf_get_u64(b, &a->size))
+                        return 0;
+        }
+
+        if (a->flags & SSH2_FILEXFER_ATTR_UIDGID) {
+                if (!sshbuf_get_u32(b, &a->uid) ||
+                    !sshbuf_get_u32(b, &a->gid))
+                        return 0;
+        }
+
+        if (a->flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
+                if (!sshbuf_get_u32(b, &a->perm))
+                        return 0;
+        }
+
+        if (a->flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
+                if (!sshbuf_get_u32(b, &a->atime) ||
+                    !sshbuf_get_u32(b, &a->mtime))
+                        return 0;
+        }
+
+        /* vendor-specific extensions */
+        if (a->flags & SSH2_FILEXFER_ATTR_EXTENDED) {
+                char *type;
+                uint8_t *data;
+                size_t dlen;
+                uint i, count;
+                if (!sshbuf_get_u32(b, &count))
+                        return 0;
+
+                for (i = 0; i < count; i++) {
+                        if (!sshbuf_get_cstring(b, &type, NULL) ||
+                            !sshbuf_get_string(b, &data, &dlen))
+                                return 0;
+                        debug3("Got file attribute \"%.100s\" len %zu",
+                               type, dlen);
+                        xfree(type);
+                        xfree(data);
+                }
+        }
+	return 1;
 }
 
 static void
 send_names(uint32_t id, int count, const Stat *stats)
 {
-	struct sshbuf *msg;
-	int i, r;
-
-	if ((msg = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
-	if ((r = sshbuf_put_u8(msg, SSH2_FXP_NAME)) != 0 ||
-	    (r = sshbuf_put_u32(msg, id)) != 0 ||
-	    (r = sshbuf_put_u32(msg, count)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	struct sshbuf *msg = sshbuf_new();
+	if (!sshbuf_put_u8(msg, SSH2_FXP_NAME) ||
+	    !sshbuf_put_u32(msg, id) ||
+	    !sshbuf_put_u32(msg, count))
+		fatal("%s: buffer error", __func__);
 	debug("request %u: sent names count %d", id, count);
+        
+        int i;
 	for (i = 0; i < count; i++) {
-		if ((r = sshbuf_put_path(msg, stats[i].name)) != 0 ||
-		    (r = sshbuf_put_path(msg, stats[i].long_name)) != 0 ||
-		    (r = encode_attrib(msg, &stats[i].attrib)) != 0)
-			fatal("%s: buffer error: %d", __func__, r);
+		if (!sshbuf_put_path(msg, stats[i].name) ||
+		    !sshbuf_put_path(msg, stats[i].long_name) ||
+		    !encode_attrib(msg, &stats[i].attrib))
+			fatal("%s: buffer error", __func__);
 	}
+
 	send_msg(msg);
 	sshbuf_free(msg);
 }
@@ -1967,16 +1719,14 @@ send_names(uint32_t id, int count, const Stat *stats)
 static void
 send_attrib(uint32_t id, const Attrib *a)
 {
-	struct sshbuf *msg;
-	int r;
-
 	debug("request %u: sent attrib have 0x%x", id, a->flags);
-	if ((msg = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
-	if ((r = sshbuf_put_u8(msg, SSH2_FXP_ATTRS)) != 0 ||
-	    (r = sshbuf_put_u32(msg, id)) != 0 ||
-	    (r = encode_attrib(msg, a)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+
+	struct sshbuf *msg = sshbuf_new();
+	if (!sshbuf_put_u8(msg, SSH2_FXP_ATTRS) ||
+	    !sshbuf_put_u32(msg, id) ||
+	    !encode_attrib(msg, a))
+		fatal("%s: buffer error", __func__);
+
 	send_msg(msg);
 	sshbuf_free(msg);
 }
@@ -1986,26 +1736,26 @@ send_attrib(uint32_t id, const Attrib *a)
 static void
 process_init(void)
 {
-	struct sshbuf *msg;
-	int r;
-
-	if ((r = sshbuf_get_u32(iqueue, &version)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if (!sshbuf_get_u32(iqueue, &version))
+		fatal("%s: buffer error", __func__);
+        
 	verbose("received client version %u", version);
-	if ((msg = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
-	if ((r = sshbuf_put_u8(msg, SSH2_FXP_VERSION)) != 0 ||
-	    (r = sshbuf_put_u32(msg, SSH2_FILEXFER_VERSION)) != 0 ||
+        if (version < SSH2_FXP_VERSION)
+                fatal("unsupported protocol version requested");
+        
+	struct sshbuf *msg = sshbuf_new();
+	if (!sshbuf_put_u8(msg, SSH2_FXP_VERSION) ||
+	    !sshbuf_put_u32(msg, SSH2_FILEXFER_VERSION) ||
 	    /* POSIX rename extension */
-	    (r = sshbuf_put_cstring(msg, "posix-rename@openssh.com")) != 0 ||
-	    (r = sshbuf_put_cstring(msg, "1")) != 0 || /* version */
+	    !sshbuf_put_cstring(msg, "posix-rename@openssh.com") ||
+	    !sshbuf_put_cstring(msg, "1") || /* version */
 	    /* hardlink extension */
-	    (r = sshbuf_put_cstring(msg, "hardlink@openssh.com")) != 0 ||
-	    (r = sshbuf_put_cstring(msg, "1")) != 0 || /* version */
+	    !sshbuf_put_cstring(msg, "hardlink@openssh.com") ||
+	    !sshbuf_put_cstring(msg, "1") || /* version */
 	    /* fsync extension */
-	    (r = sshbuf_put_cstring(msg, "fsync@openssh.com")) != 0 ||
-	    (r = sshbuf_put_cstring(msg, "1")) != 0) /* version */
-		fatal("%s: buffer error: %d", __func__, r);
+	    !sshbuf_put_cstring(msg, "fsync@openssh.com") ||
+	    !sshbuf_put_cstring(msg, "1")) /* version */
+		fatal("%s: buffer error", __func__);
 	send_msg(msg);
 	sshbuf_free(msg);
 }
@@ -2015,24 +1765,20 @@ process_open(uint32_t id)
 {
 	uint32_t pflags;
 	Attrib a;
-	wchar_t *name;
-	int r, handle, status = SSH2_FX_FAILURE;
+	wchar_t *name = NULL;;
+	int handle, status = SSH2_FX_FAILURE;
 	HANDLE fd;
 	DWORD access = 0;
 	DWORD creation = OPEN_EXISTING;
 
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_status(id, last_error_to_portable());
-                return;
+	if (!sshbuf_get_path(iqueue, &name, 0) ||
+            !sshbuf_get_u32(iqueue, &pflags)   ||
+            !decode_attrib(iqueue, &a)) {
+                if (name) xfree(name);
+                return send_ok(id, 0);
         }
 
-        if ((r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
-            (r = decode_attrib(iqueue, &a)) != 0) {
-		fatal("%s: -buffer error: %d", __func__, r);
-        }
-
-	debug3("request %u: open flags %d", id, pflags);
+        debug3("request %u: open flags %d", id, pflags);
 
 	if (pflags & SSH2_FXF_READ)
 		access |= GENERIC_READ;
@@ -2078,7 +1824,7 @@ static void
 process_close(uint32_t id)
 {
         int hix;
-        if (!get_handle_ix(iqueue, HANDLE_DIR|HANDLE_FILE, &hix))
+        if (!get_handle(iqueue, HANDLE_DIR|HANDLE_FILE, &hix))
                 return send_ok(id, 0);
 
 	handle_log_close(hix, NULL);
@@ -2101,15 +1847,12 @@ static void
 process_read(uint32_t id)
 {
         HANDLE fd;
-        if (!get_win_handle(iqueue, HANDLE_FILE, &fd))
-                return send_ok(id, 0);
-
-        int r;
         LARGE_INTEGER pos;
         uint32_t len;
-        if ((r = sshbuf_get_u64(iqueue, (uint64_t*)&(pos.QuadPart))) != 0 ||
-            (r = sshbuf_get_u32(iqueue, &len)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+        if (!get_win_handle(iqueue, HANDLE_FILE, &fd) ||
+            !sshbuf_get_u64(iqueue, (uint64_t*)&(pos.QuadPart)) ||
+            !sshbuf_get_u32(iqueue, &len))
+                return send_ok(id, 0);
 
         if (!SetFilePointerEx(fd, pos, NULL, FILE_BEGIN)) {
                 error("process_read: seek failed");
@@ -2152,56 +1895,48 @@ process_write(uint32_t id)
 {
 	LARGE_INTEGER off;
 	size_t len;
-	int r, handle, status = SSH2_FX_FAILURE;
-        HANDLE fd;
-	uint8_t *data;
+	int hix;
+	if (!get_handle(iqueue, HANDLE_FILE, &hix) ||
+	    !sshbuf_get_u64(iqueue, (uint64_t*)&(off.QuadPart)))
+                return send_ok(id, 0);
 
-	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = sshbuf_get_u64(iqueue, (uint64_t*)&(off.QuadPart))) != 0 ||
-	    (r = sshbuf_get_string(iqueue, &data, &len)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	HANDLE fd = handle_to_win_handle(hix);
+        if (!(handle_to_flags(hix) & SSH2_FXF_APPEND)) {
+                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN))
+                        return send_ok(id, 0);
+        }
 
-	debug("request %u: write \"%s\" (handle %d) off %llu len %zu",
-	    id, handle_to_name(handle), handle, (unsigned long long)off.QuadPart, len);
-	fd = handle_to_win_file_handle(handle);
-
-	if (fd == INVALID_HANDLE_VALUE)
-		status = SSH2_FX_FAILURE;
-	else {
-		if (!(handle_to_flags(handle) & SSH2_FXF_APPEND) &&
-                    !SetFilePointerEx(fd, off, NULL, FILE_BEGIN)) {
-			status = last_error_to_portable();
-			error("process_write: seek failed");
-		} else {
-/* XXX ATOMICIO ? */
-                        while (len) {
-                                DWORD written;
-                                if (WriteFile(fd, data, len, &written, NULL)) {
-                                        if (written <= len) {
-                                                data += written;
-                                                len -= written;
-                                                handle_update_write(handle, written);
-                                        } else {
-                                                error("Internal error: too much data written (%d)", written);
-                                                status = SSH2_FX_FAILURE;
-                                                break;
-                                        }
-                                }
-                                else {
-                                        error("process_write: write failed");
-                                        status = last_error_to_portable();
-                                        break;
-                                }
-                                
-			}
-                        if (len == 0)
-                                status = SSH2_FX_OK;
-
-		}
-	}
+	uint8_t *data;        
+        if (!sshbuf_get_string(iqueue, &data, &len))
+                return send_ok(id, 0);
+	
+        int status = SSH2_FX_FAILURE;
+        while (len) {
+                DWORD written;
+                if (WriteFile(fd, data, len, &written, NULL)) {
+                        if (written <= len) {
+                                data += written;
+                                len -= written;
+                        } else {
+                                error("Internal error: too much data written (%d)", written);
+                                status = SSH2_FX_FAILURE;
+                                break;
+                        }
+                }
+                else {
+                        error("process_write: write failed");
+                        status = last_error_to_portable();
+                        break;
+                }
+                
+        }
+        if (len == 0)
+                status = SSH2_FX_OK;
 	send_status(id, status);
 	xfree(data);
 }
+
+// WORKING HERE!!!
 
 static void
 process_do_stat(uint32_t id, int do_lstat)
@@ -2249,28 +1984,18 @@ process_lstat(uint32_t id)
 static void
 process_fstat(uint32_t id)
 {
-	Attrib a;
-	int r, handle, status = SSH2_FX_FAILURE;
-        HANDLE fd;
-
-	if ((r = get_handle(iqueue, &handle)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-	debug("request %u: fstat \"%s\" (handle %u)",
-	    id, handle_to_name(handle), handle);
-	fd = handle_to_win_file_handle(handle);
-	if (fd != INVALID_HANDLE_VALUE) {
+	int handle;
+	if (get_handle(iqueue, HANDLE_FILE, &handle)) {
+                HANDLE fd = handle_to_win_handle(handle);
 		BY_HANDLE_FILE_INFORMATION file_info;
                 if (GetFileInformationByHandle(fd, &file_info)) {
+                        Attrib a;
 			file_info_to_attrib(&file_info, &a, handle_to_name(handle));
                         send_attrib(id, &a);
-			status = SSH2_FX_OK;
+                        return;
                 }
-                else {
-			status = last_error_to_portable();
-                }
-	}
-	if (status != SSH2_FX_OK)
-		send_status(id, status);
+        }
+        send_ok(id, 0);
 }
 
 static void
@@ -2314,8 +2039,7 @@ process_setstat(uint32_t id)
 		strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
 		    localtime(&t));
 		logit("set \"%ls\" modtime %s", name, buf);
-		r = w_utimes(name, a.mtime, a.atime);
-		if (r == -1)
+		if (!w_utimes(name, a.mtime, a.atime))
 			status = last_error_to_portable();
 	}
 	if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
@@ -2334,64 +2058,56 @@ static void
 process_fsetstat(uint32_t id)
 {
 	Attrib a;
-	int handle, r;
-        HANDLE fd;
-	int status = SSH2_FX_OK;
+	int handle;
+	if (!get_handle(iqueue, HANDLE_DIR|HANDLE_FILE, &handle) ||
+            !decode_attrib(iqueue, &a))
+                return send_ok(id, 0);
+        
+        debug("request %u: fsetstat handle %d", id, handle);
 
-	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = decode_attrib(iqueue, &a)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+        HANDLE fd = handle_to_win_handle(handle);
+        wchar_t *name = handle_to_name(handle);
 
-	debug("request %u: fsetstat handle %d", id, handle);
-	fd = handle_to_win_file_handle(handle);
-	if (fd == INVALID_HANDLE_VALUE)
-		status = SSH2_FX_FAILURE;
-	else {
-		wchar_t *name = handle_to_name(handle);
-
-		if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
-			logit("set \"%s\" size %llu",
-			    name, (unsigned long long)a.size);
-			r = w_ftruncate(fd, a.size);
-			if (r == -1)
-				status = last_error_to_portable();
-		}
-		if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-			logit("set \"%s\" mode %04o", name, a.perm);
+        int status = SSH2_FX_OK;
+        if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
+                logit("set \"%s\" size %llu",
+                      name, (unsigned long long)a.size);
+                if (!w_ftruncate(fd, a.size))
+                        status = last_error_to_portable();
+        }
+        if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
+                logit("set \"%s\" mode %04o", name, a.perm);
 #ifdef HAVE_FCHMOD
-			r = fchmod(fd, a.perm & 07777);
+                if (!fchmod(fd, a.perm & 07777))
+                        status = last_error_to_portable();
 #else
-			// TODO: reimplement chmod!
-			/* r = chmod(name, a.perm & 07777); */
+                // TODO: reimplement chmod!
+                /* if (! chmod(name, a.perm & 07777)... */
 #endif
-			if (r == -1)
-				status = last_error_to_portable();
-		}
-		if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
-			char buf[64];
-			time_t t = a.mtime;
+        }
+        if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
+                char buf[64];
+                time_t t = a.mtime;
 
-			strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
-			    localtime(&t));
-			logit("set \"%s\" modtime %s", name, buf);
+                strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
+                         localtime(&t));
+                logit("set \"%s\" modtime %s", name, buf);
 
-			// TODO: implement and use futimes
-			// r = futimes(fd, attrib_to_tv(&a));
-			r = w_utimes(name, a.mtime, a.atime);
-			if (r == -1)
-				status = last_error_to_portable();
-		}
-		if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
-			logit("set \"%s\" owner %lu group %lu", name,
-			    (u_long)a.uid, (u_long)a.gid);
+                // TODO: implement and use futimes
+                // r = futimes(fd, attrib_to_tv(&a));
+                if (!w_utimes(name, a.mtime, a.atime))
+                        status = last_error_to_portable();
+        }
+        if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
+                logit("set \"%s\" owner %lu group %lu", name,
+                      (u_long)a.uid, (u_long)a.gid);
+                // TODO: reimplement fchown
+                // r = fchown(fd, a.uid, a.gid);
+                // r = w_chown(name, a.uid, a.gid);
+                //if (r == -1)
+                //	status = last_error_to_portable();
+        }
 
-			// TODO: reimplement fchown
-			// r = fchown(fd, a.uid, a.gid);
-			// r = w_chown(name, a.uid, a.gid);
-			//if (r == -1)
-			//	status = last_error_to_portable();
-		}
-	}
 	send_status(id, status);
 }
 
@@ -2464,7 +2180,7 @@ process_readdir(uint32_t id)
         // TODO: Fix memory leaks!
 
 	int hix;
-        if (!get_handle_ix(iqueue, HANDLE_DIR, &hix))
+        if (!get_handle(iqueue, HANDLE_DIR, &hix))
                 return send_ok(id, 0);
 
         wchar_t *path = handle_to_name(hix);
@@ -2781,25 +2497,11 @@ process_extended_hardlink(uint32_t id)
 static void
 process_extended_fsync(uint32_t id)
 {
-	int handle, r;
         HANDLE fd;
-
-	if ((r = get_handle(iqueue, &handle)) != 0) {
-                tell_error("get_handle failed");
-                send_ok(id, 0);
-        }
-
-	debug3("request %u: fsync (handle %u)", id, handle);
-	verbose("fsync \"%s\"", handle_to_name(handle));
-
-	fd = handle_to_win_file_handle(handle);
-        if (fd == INVALID_HANDLE_VALUE) {
-                tell_error("handle_to_win_file_handle failed");
-                send_ok(id, 0);
-                return;
-        }
+	if (get_win_handle(iqueue, HANDLE_FILE, &fd))
+                return send_ok(id, FlushFileBuffers(fd));
         
-        send_ok(id, FlushFileBuffers(fd));
+        send_ok(id, 0);
 }
 
 static void
