@@ -862,15 +862,18 @@ sshbuf_peek_string_direct(const struct sshbuf *buf, const uint8_t **valp,
 		*lenp = 0;
 	if (sshbuf_len(buf) < 4) {
 		debug3("sshbuf: message incomplete, len: %d", sshbuf_len(buf));
+                SetLastError(ERROR_INVALID_DATA);
 		return SSH_ERR_MESSAGE_INCOMPLETE;
 	}
 	len = PEEK_U32(p);
 	if (len > SSHBUF_SIZE_MAX - 4) {
 		debug3("sshbuf: string too large, len: %d", len);
+                SetLastError(ERROR_INVALID_DATA);
 		return SSH_ERR_STRING_TOO_LARGE;
 	}
 	if (sshbuf_len(buf) - 4 < len) {
 		debug3("sshbuf: message incomplete, len: %d, buffer len: %d", len, sshbuf_len(buf));
+                SetLastError(ERROR_INVALID_DATA);
 		return SSH_ERR_MESSAGE_INCOMPLETE;
 	}
 	if (valp != NULL)
@@ -1592,16 +1595,23 @@ handle_new(int use, const wchar_t *name, HANDLE fd, int flags, wchar_t *dir_star
 static int
 handle_is_ok(int i, int type)
 {
-	return i >= 0 && (uint)i < num_handles &&
-		(handles[i].use & HANDLE_USED) && (handles[i].use & type);
+	if (i >= 0 && (uint)i < num_handles &&
+            (handles[i].use & HANDLE_USED)) {
+                if (handles[i].use & type)
+                        return 1;
+                debug3("handle is not of expected type, expected: %d, type: %d", type, handles[i].use);
+        }
+        else
+                debug3("handle %d does not exists", i);
+        
+        SetLastError(ERROR_INVALID_HANDLE);
+
+        return 0;
 }
 
 static wchar_t *
-handle_dir_start_and_reset(int i) {
-        wchar_t *start;
-        if (!handle_is_ok(i, HANDLE_DIR))
-                fatal("internal error: handle_delete_dir_start called on a non dir handle");
-        start = handles[i].dir_start;
+handle_to_cached_dir_start_and_reset(int i) {
+        wchar_t *start = handles[i].dir_start;
 	handles[i].dir_start = NULL;
 	return start;
 }
@@ -1636,6 +1646,13 @@ handle_to_name(int handle)
 	if (handle_is_ok(handle, HANDLE_FILE|HANDLE_DIR))
 		return handles[handle].name;
 	return NULL;
+}
+
+static HANDLE
+handle_to_win_handle(int handle) {
+        if (handle_is_ok(handle, HANDLE_FILE|HANDLE_DIR))
+                return handles[handle].fd;
+        return NULL;
 }
 
 static HANDLE
@@ -1692,28 +1709,6 @@ handle_bytes_write(int handle)
 	return 0;
 }
 
-static int
-handle_close(int handle)
-{
-	if (handle_is_ok(handle, HANDLE_FILE)) {
-		CloseHandle(handles[handle].fd);
-	}
-	else if (handle_is_ok(handle, HANDLE_DIR)) {
-		FindClose(handles[handle].fd);
-	}
-	else {
-		SetLastError(ERROR_INVALID_HANDLE);
-		return -1;
-	}
-
-	if (handles[handle].name)
-		xfree(handles[handle].name);
-	if (handles[handle].dir_start)
-		xfree(handles[handle].dir_start);
-
-	return 0;
-}
-
 static void
 handle_log_close(int handle, char *emsg)
 {
@@ -1740,10 +1735,38 @@ get_handle(struct sshbuf *queue, int *hp)
 	*hp = -1;
 	if ((r = sshbuf_get_string(queue, &handle, &hlen)) != 0)
 		return r;
-	if (hlen < 256)
+	if (hlen < 256) {
 		*hp = handle_from_string(handle, hlen);
-	xfree(handle);
-	return 0;
+                xfree(handle);
+                return 0;
+        }
+        
+        SetLastError(ERROR_INVALID_DATA);
+        xfree(handle);
+        return -1;
+}
+
+static int
+get_handle_ix(struct sshbuf *queue, int type, int *hix) {
+        if (get_handle(queue, hix) == 0) {
+                if (handle_is_ok(*hix, type))
+                        return 0;
+        }
+        *hix = -1;
+        return -1;        
+}
+
+static int
+get_win_handle(struct sshbuf *queue, int type, HANDLE *hp) {
+        int hix;
+        if (get_handle(queue, &hix) == 0) {
+                if (handle_is_ok(hix, type)) {
+                        *hp = handles[hix].fd;
+                        return 1;
+                }
+        }
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
 }
 
 /* send replies */
@@ -1801,6 +1824,12 @@ send_status(uint32_t id, uint32_t status)
 	send_msg(msg);
 	sshbuf_free(msg);
 }
+
+static void
+send_ok(int id, int ok) {
+        send_status(id, (ok ? SSH2_FX_OK : last_error_to_portable()));
+}
+
 static void
 send_data_or_handle(char type, uint32_t id, const uint8_t *data, int dlen)
 {
@@ -2048,70 +2077,74 @@ process_open(uint32_t id)
 static void
 process_close(uint32_t id)
 {
-	int r, handle, ret, status = SSH2_FX_FAILURE;
+        int hix;
+        if (!get_handle_ix(iqueue, HANDLE_DIR|HANDLE_FILE, &hix))
+                return send_ok(id, 0);
 
-	if ((r = get_handle(iqueue, &handle)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	handle_log_close(hix, NULL);
 
-	debug3("request %u: close handle %d", id, handle);
-	handle_log_close(handle, NULL);
-	ret = handle_close(handle);
-	status = (ret == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
+	if (handles[hix].name)
+		xfree(handles[hix].name);
+	if (handles[hix].dir_start)
+		xfree(handles[hix].dir_start);
+
+        HANDLE h = handles[hix].fd;
+        if (handles[hix].use & HANDLE_FILE)
+                send_ok(id, CloseHandle(h));
+        else
+                send_ok(id, FindClose(h));
+
+        handle_unused(hix);
 }
 
 static void
 process_read(uint32_t id)
 {
-	uint8_t buf[64*1024];
-	uint32_t len;
-	int r, handle, status = SSH2_FX_FAILURE;
-	HANDLE fd;
-	LARGE_INTEGER off;
+        HANDLE fd;
+        if (!get_win_handle(iqueue, HANDLE_FILE, &fd))
+                return send_ok(id, 0);
 
-	if ((r = get_handle(iqueue, &handle)) != 0 ||
-	    (r = sshbuf_get_u64(iqueue, (uint64_t*)&(off.QuadPart))) != 0 ||
+        int r;
+        LARGE_INTEGER pos;
+        uint32_t len;
+        if ((r = sshbuf_get_u64(iqueue, (uint64_t*)&(pos.QuadPart))) != 0 ||
             (r = sshbuf_get_u32(iqueue, &len)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
-	debug("request %u: read \"%s\" (handle %d) off %llu len %d",
-              id, handle_to_name(handle), handle, (unsigned long long)(off.QuadPart), len);
+        if (!SetFilePointerEx(fd, pos, NULL, FILE_BEGIN)) {
+                error("process_read: seek failed");
+                return send_ok(id, 0);
+        }
+
+        uint8_t buf[64*1024];
 	if (len > sizeof buf) {
 		len = sizeof buf;
 		debug2("read change len %d", len);
 	}
-	fd = handle_to_win_file_handle(handle);
-	if (fd != INVALID_HANDLE_VALUE) {
-                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN)) {
-			error("process_read: seek failed");
-                        status = last_error_to_portable();
-		} else {
-                        uint32_t off = 0;
-                        while (len > off) {
-                                DWORD read;
-                                if (ReadFile(fd, buf + off, len - off, &read, NULL)) {
-                                        if (read) {
-                                                off += read;
-                                                handle_update_read(handle, read);
-                                        }
-                                        else { // EOF!
-                                                if (!off) status = SSH2_FX_EOF;
-                                                break;
-                                        }
-                                }
-                                else {
-                                        if (!off) status = last_error_to_portable();
-                                        break;
-                                }
-                        }
-                        if (off || !len) {
-                                send_data(id, buf, off);
-                                status = SSH2_FX_OK;
+
+        int status = SSH2_FX_FAILURE;
+        uint32_t off = 0;
+        while (len > off) {
+                DWORD read;
+                if (ReadFile(fd, buf + off, len - off, &read, NULL)) {
+                        if (read)
+                                off += read;
+                        else { // EOF!
+                                if (!off)
+                                        status = SSH2_FX_EOF;
+                                break;
                         }
                 }
+                else {
+                        if (!off) status = last_error_to_portable();
+                        break;
+                }
         }
-	if (status != SSH2_FX_OK)
-		send_status(id, status);
+        if (off || !len) {
+                return send_data(id, buf, off);
+
+        }
+        send_status(id, status);
 }
 
 static void
@@ -2430,144 +2463,128 @@ process_readdir(uint32_t id)
 {
         // TODO: Fix memory leaks!
 
-        HANDLE dd;
-	wchar_t *path;
-	int r, handle;
+	int hix;
+        if (!get_handle_ix(iqueue, HANDLE_DIR, &hix))
+                return send_ok(id, 0);
 
-	if ((r = get_handle(iqueue, &handle)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+        wchar_t *path = handle_to_name(hix);
+        HANDLE dd = handle_to_win_handle(hix);
+        
+	if (dd == INVALID_HANDLE_VALUE || path == NULL)
+                return send_ok(id, 0);
 
-	debug("request %u: readdir \"%s\" (handle %d)", id,
-	    handle_to_name(handle), handle);
-        path = handle_to_name(handle);
-	dd = handle_to_win_dir_handle(handle);
-	if (dd == INVALID_HANDLE_VALUE || path == NULL) {
-		send_status(id, SSH2_FX_FAILURE);
-	} else {
-                wchar_t *fn = handle_dir_start_and_reset(handle);
-                if (!fn) {
-                        WIN32_FIND_DATAW find_data;
-                        if (FindNextFileW(dd, &find_data))
-                                fn = xwcsdup(find_data.cFileName);
-                        else
-                                tell_error("FindNextFile failed");
-                }
-                if (fn) {
-                        // TODO: send more than one entry per packet
-                        wchar_t *fullname = xwcscat(path, fn);
-                        Stat stats;
-                        wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL;
-                        wchar_t mode[11 + 1];
-                        StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
-
-                        stats.name = fn;
-                        attrib_clear(&stats.attrib);
-                        HANDLE fd = CreateFileW(fullname,
-						FILE_READ_ATTRIBUTES|READ_CONTROL,
-						FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-						NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-                        if (fd == INVALID_HANDLE_VALUE)
-                            tell_error("CreateFile failed");
-                        else {
-                            BY_HANDLE_FILE_INFORMATION file_info;
-                            if (GetFileInformationByHandle(fd, &file_info)) {
-				    file_info_to_attrib(&file_info, &stats.attrib, fullname);
-				    file_info_to_str(&file_info, mode);
-                            }
-                            else
-                                tell_error("GetFileInformationByHandle failed");
-
-                            SECURITY_DESCRIPTOR *sd = NULL;
-                            SID *sid_owner = NULL, *sid_group = NULL;
-                            if (GetSecurityInfo(fd, SE_FILE_OBJECT,
-                                                OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION,
-                                                (void **)&sid_owner, (void **)&sid_group,
-                                                NULL, NULL,
-                                                (void**)&sd) == ERROR_SUCCESS) {
-
-                                SID_NAME_USE use = SidTypeUnknown;
-                                DWORD user_size = 0, group_size = 0, user_domain_size = 0, group_domain_size = 0;
-                                LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &user_domain_size, &use);
-                                if (user_size) {
-                                        user_domain = xwcsalloc(user_domain_size);
-                                        user = xwcsalloc(user_size);
-                                        if (!LookupAccountSidW(NULL, sid_owner, user, &user_size, user_domain, &user_domain_size, &use)) {
-                                                tell_error("LookupAccountSid failed (2)");
-                                                xfree(user);
-                                                xfree(user_domain);
-                                                user = NULL;
-                                                group_domain = NULL;
-                                        }
-                                        else {
-                                                debug("user: %ls, domain: %ls", user, user_domain);
-                                        }
-                                }
-                                else
-                                        tell_error("LookupAccountSid failed (1)");
-
-                                LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &group_domain_size, &use);
-                                if (group_size) {
-                                        group_domain = xwcsalloc(group_domain_size);
-                                        group = xwcsalloc(group_size);
-                                        if (!LookupAccountSidW(NULL, sid_group, group, &group_size, group_domain, &group_domain_size, &use)) {
-                                                tell_error("LookupAccountSid failed (4)");
-                                                xfree(group);
-                                                xfree(group_domain);
-                                                group = NULL;
-                                                group_domain = NULL;
-                                        }
-                                        else {
-                                                debug("group: %ls, domain: %ls", group, group_domain);
-                                        }
-                                }
-                                else
-                                        tell_error("LookupAccountSid failed (1)");
-
-                                LocalFree(sd);
-                            }
-                            else
-                                    tell_error("GetSecurityInfo failed");
-
-                            CloseHandle(fd);
-                        }
-                        stats.long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
-                                                  mode, 1,
-                                                  (user ? user : L"?"),
-                                                  (user_domain ? user_domain : L"?"),
-                                                  (group ? group : L"?"),
-                                                  (group_domain ? group_domain : L"?"),
-                                                  stats.attrib.size,
-                                                  L"yesterday",
-                                                  fn);
-
-                        send_names(id, 1, &stats);
-			xfree(fn);
-			xfree(fullname);
-			xfree(stats.long_name);
-                        if (user) xfree(user);
-                        if (group) xfree(group);
-                        if (user_domain) xfree(user_domain);
-                        if (group_domain) xfree(group_domain);
-                }
-                else
-                        send_status(id, SSH2_FX_EOF);
+        Stat stats;
+        attrib_clear(&stats.attrib);
+        
+        stats.name = handle_to_cached_dir_start_and_reset(hix);
+        if (!stats.name) {
+                WIN32_FIND_DATAW find_data;
+                if (!FindNextFileW(dd, &find_data))
+                        return send_ok(id, 0);
+                stats.name = xwcsdup(find_data.cFileName);
         }
+
+        // TODO: send more than one entry per packet
+        wchar_t *fullname = xwcscat(path, stats.name);
+
+        wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL;
+        wchar_t mode[11 + 1];
+        StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
+
+        HANDLE fd = CreateFileW(fullname,
+                                FILE_READ_ATTRIBUTES|READ_CONTROL,
+                                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (fd == INVALID_HANDLE_VALUE)
+                tell_error("CreateFile failed");
+        else {
+                BY_HANDLE_FILE_INFORMATION file_info;
+                if (GetFileInformationByHandle(fd, &file_info)) {
+                        file_info_to_attrib(&file_info, &stats.attrib, fullname);
+                        file_info_to_str(&file_info, mode);
+                }
+                else tell_error("GetFileInformationByHandle failed");
+                
+                SECURITY_DESCRIPTOR *sd = NULL;
+                SID *sid_owner = NULL, *sid_group = NULL;
+                if (GetSecurityInfo(fd, SE_FILE_OBJECT,
+                                    OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION,
+                                    (void **)&sid_owner, (void **)&sid_group,
+                                    NULL, NULL,
+                                    (void**)&sd) == ERROR_SUCCESS) {
+
+                        SID_NAME_USE use = SidTypeUnknown;
+                        DWORD user_size = 0, group_size = 0, user_domain_size = 0, group_domain_size = 0;
+                        LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &user_domain_size, &use);
+                        if (user_size) {
+                                user_domain = xwcsalloc(user_domain_size);
+                                user = xwcsalloc(user_size);
+                                if (!LookupAccountSidW(NULL, sid_owner, user, &user_size, user_domain, &user_domain_size, &use)) {
+                                        tell_error("LookupAccountSid failed (2)");
+                                        xfree(user);
+                                        xfree(user_domain);
+                                        user = NULL;
+                                        group_domain = NULL;
+                                }
+                                else debug("user: %ls, domain: %ls", user, user_domain);
+
+                        }
+                        else tell_error("LookupAccountSid failed (1)");
+
+                        LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &group_domain_size, &use);
+                        if (group_size) {
+                                group_domain = xwcsalloc(group_domain_size);
+                                group = xwcsalloc(group_size);
+                                if (!LookupAccountSidW(NULL, sid_group, group, &group_size, group_domain, &group_domain_size, &use)) {
+                                        tell_error("LookupAccountSid failed (4)");
+                                        xfree(group);
+                                        xfree(group_domain);
+                                        group = NULL;
+                                        group_domain = NULL;
+                                }
+                                else debug("group: %ls, domain: %ls", group, group_domain);
+                        }
+                        else tell_error("LookupAccountSid failed (1)");
+
+                        LocalFree(sd);
+                }
+                else tell_error("GetSecurityInfo failed");
+
+                CloseHandle(fd);
+        }
+        stats.long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
+                                  mode, 1,
+                                  (user ? user : L"?"),
+                                  (user_domain ? user_domain : L"?"),
+                                  (group ? group : L"?"),
+                                  (group_domain ? group_domain : L"?"),
+                                  stats.attrib.size,
+                                  L"yesterday",
+                                  stats.name);
+
+        send_names(id, 1, &stats);
+        
+        xfree(fullname);
+        xfree(stats.name);
+        xfree(stats.long_name);
+        if (user) xfree(user);
+        if (group) xfree(group);
+        if (user_domain) xfree(user_domain);
+        if (group_domain) xfree(group_domain);
 }
 
 static void
 process_remove(uint32_t id)
 {
-	char *name;
-	int r, status = SSH2_FX_FAILURE;
+	wchar_t *name;
+	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: remove", id);
 	logit("remove name \"%s\"", name);
-	r = unlink(name);
-	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
+        send_ok(id, DeleteFileW(name));
 	xfree(name);
 }
 
@@ -2588,27 +2605,22 @@ process_mkdir(uint32_t id)
 	logit("mkdir name \"%s\" mode 0%o", name, mode);
         
         // TODO: honor attributes
-        if (CreateDirectoryW(name, NULL))
-                send_status(id, SSH2_FX_OK);
-	else
-                send_status(id, last_error_to_portable());
+        send_ok(id, CreateDirectoryW(name, NULL));
 	xfree(name);
 }
 
 static void
 process_rmdir(uint32_t id)
 {
-	char *name;
-	int r, status;
+	wchar_t *name;
+	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: rmdir", id);
 	logit("rmdir name \"%s\"", name);
-	r = rmdir(name);
-	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
+        send_status(id, RemoveDirectoryW(name));
 	xfree(name);
 }
 
@@ -2619,8 +2631,11 @@ process_realpath(uint32_t id)
         int status = SSH2_FX_FAILURE;
 	int r;
 
-	if ((r = sshbuf_get_path(iqueue, &path, 0)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &path, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_ok(id, 0);
+        }
+                
 	debug3("request %u: realpath", id);
 	verbose("realpath \"%ls\"", path);
         
@@ -2663,24 +2678,20 @@ process_realpath(uint32_t id)
 static void
 process_rename(uint32_t id)
 {
-	char *oldpath, *newpath;
-	int r, status;
+	wchar_t *oldpath, *newpath;
+	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
-	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
+	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_ok(id, 0);
+        }
 
 	debug3("request %u: rename", id);
 	logit("rename old \"%s\" new \"%s\"", oldpath, newpath);
-	status = SSH2_FX_FAILURE;
 
-	if (MoveFile(oldpath, newpath))
-		status = SSH2_FX_OK;
-	else {
-		status = last_error_to_portable();
-	}
+	send_ok(id, MoveFileW(oldpath, newpath));
 
-	send_status(id, status);
 	xfree(oldpath);
 	xfree(newpath);
 }
@@ -2689,13 +2700,15 @@ static void
 process_readlink(uint32_t id)
 {
 	int r;
-	char *path;
+	wchar_t *path;
 
-	if ((r = sshbuf_get_cstring(iqueue, &path, NULL)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &path, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_ok(id, 0);
+        }
 
-	debug3("request %u: readlink", id);
-	verbose("readlink \"%s\" (unsupported)", path);
+        debug3("request %u: readlink", id);
+        verbose("readlink \"%s\" (unsupported)", path);
 
         send_status(id, SSH2_FX_OP_UNSUPPORTED);
 
@@ -2705,12 +2718,14 @@ process_readlink(uint32_t id)
 static void
 process_symlink(uint32_t id)
 {
-	char *oldpath, *newpath;
+	wchar_t *oldpath, *newpath;
 	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
-	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
+	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_ok(id, 0);
+        }
 
 	debug3("request %u: symlink", id);
 	logit("symlink old \"%s\" new \"%s\" (unsupported)", oldpath, newpath);
@@ -2724,18 +2739,20 @@ process_symlink(uint32_t id)
 static void
 process_extended_posix_rename(uint32_t id)
 {
-	char *oldpath, *newpath;
-	int r, status;
+	wchar_t *oldpath, *newpath;
+	int r;
 
-	if ((r = sshbuf_get_cstring(iqueue, &oldpath, NULL)) != 0 ||
-	    (r = sshbuf_get_cstring(iqueue, &newpath, NULL)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
+	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_ok(id, 0);
+        }
 
 	debug3("request %u: posix-rename", id);
 	logit("posix-rename old \"%s\" new \"%s\"", oldpath, newpath);
-	r = rename(oldpath, newpath);
-	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
+
+        send_ok(id, MoveFileW(oldpath, newpath));
+
 	xfree(oldpath);
 	xfree(newpath);
 }
@@ -2747,18 +2764,15 @@ process_extended_hardlink(uint32_t id)
 	int r;
 
 	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
-	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_ok(id, 0);
+        }
 
 	debug3("request %u: hardlink", id);
 	logit("hardlink old \"%ls\" new \"%ls\"", oldpath, newpath);
 
-        if (CreateHardLinkW(newpath, oldpath, NULL))
-                send_status(id, SSH2_FX_OK);
-        else {
-                tell_error("CreateHardLinkW failed");
-                send_status(id, last_error_to_portable());
-        }
+        send_ok(id, CreateHardLinkW(newpath, oldpath, NULL));
 
 	xfree(oldpath);
 	xfree(newpath);
@@ -2767,23 +2781,25 @@ process_extended_hardlink(uint32_t id)
 static void
 process_extended_fsync(uint32_t id)
 {
-	int handle, r, status = SSH2_FX_OP_UNSUPPORTED;
+	int handle, r;
         HANDLE fd;
 
-	if ((r = get_handle(iqueue, &handle)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = get_handle(iqueue, &handle)) != 0) {
+                tell_error("get_handle failed");
+                send_ok(id, 0);
+        }
+
 	debug3("request %u: fsync (handle %u)", id, handle);
 	verbose("fsync \"%s\"", handle_to_name(handle));
+
 	fd = handle_to_win_file_handle(handle);
-        if (fd == INVALID_HANDLE_VALUE)
-		status = SSH2_FX_NO_SUCH_FILE;
-	else if (handle_is_ok(handle, HANDLE_FILE)) {
-                if (FlushFileBuffers(fd))
-                        status = SSH2_FX_OK;
-                else
-                        status = last_error_to_portable();
-	}
-	send_status(id, status);
+        if (fd == INVALID_HANDLE_VALUE) {
+                tell_error("handle_to_win_file_handle failed");
+                send_ok(id, 0);
+                return;
+        }
+        
+        send_ok(id, FlushFileBuffers(fd));
 }
 
 static void
