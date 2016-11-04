@@ -96,6 +96,7 @@
 #define SSH_ERR_STRING_TOO_LARGE		-6
 #define SSH_ERR_NO_BUFFER_SPACE			-9
 #define SSH_ERR_BUFFER_READ_ONLY		-49
+#define SSH_ERR_BAD_PATHNAME                    -50
 
 typedef enum {
 	LOG_LEVEL_QUIET,
@@ -428,35 +429,6 @@ xwcsdup(const wchar_t *wstr)
 }
 
 static void *
-xcopyarray(const void *data, size_t nmenb, size_t size) {
-        void *cp = xmallocarray(nmenb, size);
-        memcpy(cp, data, nmenb * size);
-        return cp;
-}
-
-static wchar_t *
-xwcopy(const wchar_t *data, size_t size) {
-        return (wchar_t *)xcopyarray(data, size, sizeof(wchar_t));
-}
-
-/* static int */
-/* xasprintf(char **ret, const char *fmt, ...) */
-/* { */
-/* 	va_list ap; */
-/* 	int i; */
-
-/* 	va_start(ap, fmt); */
-/* 	i = vasprintf(ret, fmt, ap); */
-/* 	va_end(ap); */
-
-/* 	if (i < 0 || *ret == NULL) */
-/* 		fatal("xasprintf: could not allocate memory"); */
-
-/* 	return (i); */
-/* } */
-
-
-static void *
 xrealloc(void *ptr, size_t size) {
 	void *new_ptr = (ptr
 			 ? HeapReAlloc(GetProcessHeap(), 0, ptr, size)
@@ -486,44 +458,6 @@ xwcscat(wchar_t *str, wchar_t *cat) {
         wmemcpy(cp, str, str_len);
         wmemcpy(cp + str_len, cat, cat_len + 1);
         return cp;
-}
-
-static wchar_t *
-xpathjoin(wchar_t *base, wchar_t *name) {
-        // network and other rare paths are forbidden: \\foo\bar, \\?\, \\.\, etc.
-        if (name[0] == '\\' && name[1] == '\\') {
-                debug3("xpathjoin(%ls, %ls) failed, \\... paths are forbidden", base, name);
-                SetLastError(ERROR_BAD_PATHNAME);
-                return NULL;
-        }
-
-        // volume: C:...
-        if (isalpha(name[0]) && name[1] == ':') {
-                // volume + absolute path
-                if (name[2] == '\0')
-                        return xwcscat(name, L"/");
-                // just volume: c:
-                if (name[2] == '/' || name[2] == '\\')
-                        return xwcsdup(name);
-
-                // volume + relative is forbidden: c:foo.txt
-                debug3("xpathjoin(%ls, %ls) failed, volume + relative path is forbidden", base, name);
-                SetLastError(ERROR_BAD_PATHNAME);
-                return NULL;
-        }
-
-        // append name to base:
-        int base_len  = (base ? wcslen(base) : 0);
-        int name_len = wcslen(name);
-        if (!base_len)
-                return (name_len ? xwcopy(name, name_len + 1) : xwcopy(L".", 2));
-
-        wchar_t *long_name = xwcsalloc(base_len + name_len + 2);
-        wmemcpy(long_name, base, base_len);
-        if (base[base_len - 1] != '/' && base[base_len - 1] != '\\')
-                long_name[base_len++] = '/';
-        wmemcpy(long_name + base_len, name, name_len + 1);
-        return long_name;
 }
 
 static void
@@ -1047,53 +981,99 @@ sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
 }
 
 static int
-sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, size_t *lenp)
+sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
 {
-	size_t len;
-	const uint8_t *p;
-	int r;
-
 	if (valp != NULL)
 		*valp = NULL;
-	if (lenp != NULL)
-		*lenp = 0;
+
+        append_bar = (append_bar ? 1 : 0);
+        
+        size_t len;
+        const uint8_t *p;
+	int r;
+        static const uint8_t forbidden_path_chr[] = "<>:\"|?*";
+        static const uint8_t current_dir[] = ".";
+        
+
 	if ((r = sshbuf_peek_cstring(buf, &p, &len)) != 0)
 		return r;
 
 	if ((r = sshbuf_skip_string(buf)) != 0)
 		return -1;
 
-	size_t wlen;
-	if (len) {
-		if ((wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-						(const char *)p, len, NULL, 0)) != 0) {
-			if (valp) {
-				*valp = xwcsalloc(wlen + 1);
-				if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-							(const char *)p, len, *valp, wlen) == wlen) {
-					(*valp)[wlen] = 0;
-				}
-				else {
-					tell_error("MultibyteToWideChar failed");
-					xfree(*valp);
-					*valp = NULL;
-					return SSH_ERR_INVALID_FORMAT;
-				}
-			}
-			if (lenp)
-				*lenp = wlen;
-		}
-		else {
-			tell_error("MultiByteToWideChar failed");
-			return SSH_ERR_INVALID_FORMAT;
-		}
-	}
-	else {
-		debug("zero length path given");
-		if (valp)
-			*valp = xwcsdup(L"");
-	}
+        int skip_vol = 0;
+        if (len == 0) {
+                debug("zero length path given, taken as '.'");
+                p = current_dir;
+                len = 1;
+        }
+        else {
+                if (len >= 2 && p[0] == '\\' && p[1] == '\\') {
+                        debug3("sshbud_get_path failed, \\\\... paths are forbidden");
+                        SetLastError(ERROR_BAD_PATHNAME);
+                        return SSH_ERR_BAD_PATHNAME;
+                }
 
+                int i;
+                // convert '\\' to '/'
+                for (i = 0; i < len; i++)
+                        // just override the const qualifier
+                        if (p[i] == '\\') ((uint8_t *)p)[i] = '/';
+
+                if (len >= 2 && isalpha(p[0]) && p[1] == ':') {
+                        if (len == 2 || p[2] != '/') {
+                                // TODO: use GetFullPathName() to resolve the path
+                                debug3("sshbuf_get_path failed, relative paths after a volume name are fobidden");
+                                SetLastError(ERROR_BAD_PATHNAME);
+                                return SSH_ERR_BAD_PATHNAME;
+                        }
+                        skip_vol = 2;
+                }
+
+                for (i = skip_vol; i < len; i++) {
+                        if (memchr(forbidden_path_chr, p[i], sizeof(forbidden_path_chr))) {
+                                debug3("sshbuf_get_path failed, character %c (0x%2x) is forbidden in path names", p[i], p[i]);
+                                SetLastError(ERROR_BAD_PATHNAME);
+                                return SSH_ERR_BAD_PATHNAME;
+                        }
+                }
+
+                // remove trailing '/' characters
+                // except when it is the first character
+                for (i = len; --i > skip_vol;) {
+                        if (p[i] != '/') break;
+                        len--;
+                }
+                if (p[i] == '/') append_bar = 0;
+        }
+
+        int wlen;
+        if ((wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        (const char *)p, len, NULL, 0)) != 0) {
+                if (valp) {
+                        *valp = xwcsalloc(wlen + append_bar + 1);
+                        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                (const char *)p, len, *valp, wlen) == wlen) {
+                                if (append_bar) {
+                                        (*valp)[wlen] = '/';
+                                        (*valp)[wlen + 1] = 0;
+                                }
+                                else
+                                        (*valp)[wlen] = 0;
+                        }
+                        else {
+                                tell_error("MultibyteToWideChar failed");
+                                xfree(*valp);
+                                *valp = NULL;
+                                return SSH_ERR_INVALID_FORMAT;
+                        }
+                }
+        }
+        else {
+                tell_error("MultiByteToWideChar failed");
+                return SSH_ERR_INVALID_FORMAT;
+        }
+        
 	if (valp && *valp)
 		debug3("get_path: %ls", *valp);
 
@@ -2010,7 +1990,7 @@ process_open(uint32_t id)
 	DWORD access = 0;
 	DWORD creation = OPEN_EXISTING;
 
-	if ((r = sshbuf_get_path(iqueue, &name, NULL)) != 0 ||
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0 ||
 	    (r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
 	    (r = decode_attrib(iqueue, &a)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
@@ -2189,7 +2169,7 @@ process_do_stat(uint32_t id, int do_lstat)
 	wchar_t *name;
 	int r, status = SSH2_FX_FAILURE;
 
-	if ((r = sshbuf_get_path(iqueue, &name, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: %sstat", id, do_lstat ? "l" : "");
@@ -2259,7 +2239,7 @@ process_setstat(uint32_t id)
 	wchar_t *name;
 	int r, status = SSH2_FX_OK;
 
-	if ((r = sshbuf_get_path(iqueue, &name, NULL)) != 0 ||
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0 ||
 	    (r = decode_attrib(iqueue, &a)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
@@ -2380,48 +2360,33 @@ process_opendir(uint32_t id)
         HANDLE dd;
 	wchar_t *path, *pattern;
 	int r, handle, status = SSH2_FX_FAILURE;
-        size_t path_len;
         WIN32_FIND_DATAW find_data;
 
-	if ((r = sshbuf_get_path(iqueue, &path, &path_len)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &path, 1)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: opendir", id);
 
-        wchar_t *fullpath = xpathjoin(NULL, path);
+	logit("opendir \"%ls\"", path);
 
-	logit("opendir \"%ls\", len: %ld, fullpath: %ls", path, path_len, fullpath);
+        pattern = xwcscat(path, L"*");
+        debug3("FindFistFileW(pattern=%ls)", pattern);
 
-        
-        if (fullpath) {
-                size_t len = wcslen(fullpath);
-                if (len == 0 || fullpath[len - 1] == '/' || fullpath[len - 1] == '\\') {
-                        path = xreallocarray(path, len + 1, sizeof(wchar_t));
-                        wmemcpy(path + len, L"/", 2);
-                        len++;
-                }
-
-                pattern = xwcscat(fullpath, L"*");
-
-                debug3("FindFistFileW(pattern=%ls)", pattern);
-
-                dd = FindFirstFileW(pattern, &find_data);
-
-                if (dd == INVALID_HANDLE_VALUE) {
-                        tell_error("FindFirstFile failed");
-                        status = last_error_to_portable();
-                }
-                else {
-                        handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
-                        if (handle < 0) {
-                                CloseHandle(dd);
-                        } else {
-                                send_handle(id, handle);
-                                status = SSH2_FX_OK;
-                        }
-                }
-                xfree(fullpath);
+        dd = FindFirstFileW(pattern, &find_data);
+        if (dd == INVALID_HANDLE_VALUE) {
+                tell_error("FindFirstFile failed");
+                status = last_error_to_portable();
         }
+        else {
+                handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
+                if (handle < 0) {
+                        CloseHandle(dd);
+                } else {
+                        send_handle(id, handle);
+                        status = SSH2_FX_OK;
+                }
+        }
+
         if (status != SSH2_FX_OK)
                 send_status(id, status);
 
@@ -2478,7 +2443,7 @@ process_readdir(uint32_t id)
                 }
                 if (fn) {
                         // TODO: send more than one entry per packet
-                        wchar_t *fullname = xpathjoin(path, fn);
+                        wchar_t *fullname = xwcscat(path, fn);
                         Stat stats;
                         wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL;
                         wchar_t mode[11 + 1];
@@ -2599,10 +2564,10 @@ static void
 process_mkdir(uint32_t id)
 {
 	Attrib a;
-	char *name;
-	int r, mode, status = SSH2_FX_FAILURE;
+	wchar_t *name;
+	int r, mode;
 
-	if ((r = sshbuf_get_cstring(iqueue, &name, NULL)) != 0 ||
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0 ||
 	    (r = decode_attrib(iqueue, &a)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
@@ -2610,10 +2575,12 @@ process_mkdir(uint32_t id)
 	    a.perm & 07777 : 0777;
 	debug3("request %u: mkdir", id);
 	logit("mkdir name \"%s\" mode 0%o", name, mode);
-	//r = mkdir(name, mode);
-	r = mkdir(name); // TODO: set mode!
-	status = (r == -1) ? last_error_to_portable() : SSH2_FX_OK;
-	send_status(id, status);
+        
+        // TODO: honor attributes
+        if (CreateDirectoryW(name, NULL))
+                send_status(id, SSH2_FX_OK);
+	else
+                send_status(id, last_error_to_portable());
 	xfree(name);
 }
 
@@ -2641,47 +2608,41 @@ process_realpath(uint32_t id)
         int status = SSH2_FX_FAILURE;
 	int r;
 
-	if ((r = sshbuf_get_path(iqueue, &path, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &path, 0)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 	debug3("request %u: realpath", id);
 	verbose("realpath \"%ls\"", path);
         
-        wchar_t *sanepath = xpathjoin(NULL, path);
-        debug3("sanepath: %ls", sanepath);
-        if (sanepath) {
-                DWORD len = GetFullPathNameW(sanepath, 0, NULL, NULL);
-                if (len) {
-                        wchar_t *fullpath = xwcsalloc(len);
-                        DWORD len1 = GetFullPathNameW(sanepath, len, fullpath, NULL);
-                        if (len1 > 0 && len1 < len) {
-                                size_t len = GetLongPathNameW(fullpath, NULL, 0);
-                                if (len) {
-                                        wchar_t *longpath = xwcsalloc(len);
-                                        size_t len1 = GetLongPathNameW(fullpath, longpath, len);
-                                        if (len1 && len1 < len) {
-                                                Stat s;
-                                                attrib_clear(&s.attrib);
-                                                s.name = longpath;
-                                                s.long_name = xwcsdup(L"");
-                                                send_names(id, 1, &s);
-                                                status = SSH2_FX_OK;
-                                        }
-                                        else
-                                                tell_error("GetLongPathNameW failed (2)");
-                                        xfree(longpath);
+        DWORD len = GetFullPathNameW(path, 0, NULL, NULL);
+        if (len) {
+                wchar_t *fullpath = xwcsalloc(len);
+                DWORD len1 = GetFullPathNameW(path, len, fullpath, NULL);
+                if (len1 > 0 && len1 < len) {
+                        size_t len = GetLongPathNameW(fullpath, NULL, 0);
+                        if (len) {
+                                wchar_t *longpath = xwcsalloc(len);
+                                size_t len1 = GetLongPathNameW(fullpath, longpath, len);
+                                if (len1 && len1 < len) {
+                                        Stat s;
+                                        attrib_clear(&s.attrib);
+                                        s.name = longpath;
+                                        s.long_name = xwcsdup(L"");
+                                        send_names(id, 1, &s);
+                                        status = SSH2_FX_OK;
                                 }
                                 else
-                                        tell_error("GetLongPathNameW failed (1)");
+                                        tell_error("GetLongPathNameW failed (2)");
+                                xfree(longpath);
                         }
                         else
-                                tell_error("GetFullPathNameW failed (2)");
-                        xfree(fullpath);
+                                tell_error("GetLongPathNameW failed (1)");
                 }
                 else
-                        tell_error("GetFullPathNameW failed (1)");
-
-                xfree(sanepath);
+                        tell_error("GetFullPathNameW failed (2)");
+                xfree(fullpath);
         }
+        else
+                tell_error("GetFullPathNameW failed (1)");
         
         if (status != SSH2_FX_OK)
 		send_status(id, last_error_to_portable());
@@ -2774,27 +2735,22 @@ process_extended_hardlink(uint32_t id)
 	wchar_t *oldpath, *newpath;
 	int r;
 
-	if ((r = sshbuf_get_path(iqueue, &oldpath, NULL)) != 0 ||
-	    (r = sshbuf_get_path(iqueue, &newpath, NULL)) != 0)
+	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
+	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0)
 		fatal("%s: buffer error: %d", __func__, r);
 
 	debug3("request %u: hardlink", id);
 	logit("hardlink old \"%ls\" new \"%ls\"", oldpath, newpath);
 
-        wchar_t *saneoldpath = xpathjoin(NULL, oldpath);
-        xfree(oldpath);
-        wchar_t *sanenewpath = xpathjoin(NULL, newpath);
-        xfree(newpath);
-
-        if (CreateHardLinkW(sanenewpath, saneoldpath, NULL))
+        if (CreateHardLinkW(newpath, oldpath, NULL))
                 send_status(id, SSH2_FX_OK);
         else {
                 tell_error("CreateHardLinkW failed");
                 send_status(id, last_error_to_portable());
         }
 
-	xfree(saneoldpath);
-	xfree(sanenewpath);
+	xfree(oldpath);
+	xfree(newpath);
 }
 
 static void
