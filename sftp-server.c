@@ -1016,14 +1016,16 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
 
                 int i;
                 // convert '\\' to '/'
-                for (i = 0; i < len; i++)
+                for (i = 0; i < len; i++) {
                         // just override the const qualifier
                         if (p[i] == '\\') ((uint8_t *)p)[i] = '/';
+                }
 
                 if (len >= 2 && isalpha(p[0]) && p[1] == ':') {
                         if (len == 2 || p[2] != '/') {
                                 // TODO: use GetFullPathName() to resolve the path
-                                debug3("sshbuf_get_path failed, relative paths after a volume name are fobidden");
+                                debug3("sshbuf_get_path (%*s) failed, relative paths after a volume name are fobidden",
+                                       len, p);
                                 SetLastError(ERROR_BAD_PATHNAME);
                                 return SSH_ERR_BAD_PATHNAME;
                         }
@@ -1990,10 +1992,16 @@ process_open(uint32_t id)
 	DWORD access = 0;
 	DWORD creation = OPEN_EXISTING;
 
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0 ||
-	    (r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
-	    (r = decode_attrib(iqueue, &a)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_status(id, last_error_to_portable());
+                return;
+        }
+
+        if ((r = sshbuf_get_u32(iqueue, &pflags)) != 0 || /* portable flags */
+            (r = decode_attrib(iqueue, &a)) != 0) {
+		fatal("%s: -buffer error: %d", __func__, r);
+        }
 
 	debug3("request %u: open flags %d", id, pflags);
 
@@ -2362,8 +2370,11 @@ process_opendir(uint32_t id)
 	int r, handle, status = SSH2_FX_FAILURE;
         WIN32_FIND_DATAW find_data;
 
-	if ((r = sshbuf_get_path(iqueue, &path, 1)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	if ((r = sshbuf_get_path(iqueue, &path, 1)) != 0) {
+                tell_error("sshbuf_get_path failed");
+                send_status(id, last_error_to_portable());
+                return;
+        }
 
 	debug3("request %u: opendir", id);
 
