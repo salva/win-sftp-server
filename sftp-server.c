@@ -1493,15 +1493,15 @@ handle_to_flags(int handle) {
 }
 
 static void
-handle_log_close(int handle, char *emsg) {
-	if (handle_is_ok(handle, HANDLE_FILE)) {
+handle_log_close(int hix, char *emsg) {
+	if (handles[hix].use & HANDLE_FILE) {
 		logit("%s%sclose \"%s\"",
                       emsg == NULL ? "" : emsg, emsg == NULL ? "" : " ",
-                      handle_to_name(handle));
+                      handle_to_name(hix));
 	} else {
 		logit("%s%sclosedir \"%s\"",
 		    emsg == NULL ? "" : emsg, emsg == NULL ? "" : " ",
-		    handle_to_name(handle));
+		    handle_to_name(hix));
 	}
 }
 
