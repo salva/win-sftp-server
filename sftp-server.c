@@ -214,6 +214,7 @@ struct sftp_handler handlers[] = {
 	{ "rename", NULL, SSH2_FXP_RENAME, process_rename, 1 },
 	{ "readlink", NULL, SSH2_FXP_READLINK, process_readlink, 0 },
 	{ "symlink", NULL, SSH2_FXP_SYMLINK, process_symlink, 1 },
+        { "extended", NULL, SSH2_FXP_EXTENDED, process_extended, 0 },
 	{ NULL, NULL, 0, NULL, 0 }
 };
 
@@ -367,8 +368,8 @@ xmalloc(size_t size)
 
 static void
 xfree(void *ptr) {
-	if (!HeapFree(GetProcessHeap(), 0, ptr))
-		fatal_error("HeapFree failed");
+        if (ptr && !HeapFree(GetProcessHeap(), 0, ptr))
+                fatal_error("HeapFree failed");
 }
 
 static void *
@@ -458,6 +459,26 @@ xwcscat(wchar_t *str, wchar_t *cat) {
         wmemcpy(cp, str, str_len);
         wmemcpy(cp + str_len, cat, cat_len + 1);
         return cp;
+}
+
+static wchar_t *
+xprintf(const wchar_t *fmt, ...) {
+	size_t max = 100;
+	wchar_t *line = NULL;
+	while (1) {
+		line = xreallocarray(line, max, sizeof(wchar_t));
+		va_list args;
+		va_start(args, fmt);
+		HRESULT rc = StringCchVPrintfW(line, max, fmt, args);
+		va_end(args);
+		switch (rc) {
+		case S_OK:
+			return line;
+		case STRSAFE_E_INVALID_PARAMETER:
+			fatal_error("StringCchVprintf failed");
+		}
+		max *= 2;
+	}
 }
 
 static void
@@ -901,41 +922,20 @@ sshbuf_get_string(struct sshbuf *buf, uint8_t **valp, size_t *lenp)
 }
 
 static int
-sshbuf_peek_cstring(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
-{
+sshbuf_get_cstring(struct sshbuf *buf, char **valp) {
 	size_t len;
 	const uint8_t *p;
-	if (sshbuf_peek_string_direct(buf, &p, &len)) {
-                /* Allow a \0 only at the end of the string */
+        if (sshbuf_peek_string_direct(buf, &p, &len)) {
                 if (len == 0 || !memchr(p , '\0', len - 1)) {
-                        if (valp) *valp = p;
-                        if (lenp) *lenp = len;
-                        return 1;
+                        if (sshbuf_skip_string(buf)) {
+                                *valp = xmalloc(len + 1);
+                                memcpy(*valp, p, len);
+                                (*valp)[len] = '\0';
+                                return 1;
+                        }
                 }
-                SetLastError(ERROR_INVALID_DATA);
-	}
-	if (valp) *valp = NULL;
-	if (lenp) *lenp = 0;
-	return 0;
-}
-
-static int
-sshbuf_get_cstring(struct sshbuf *buf, char **valp, size_t *lenp)
-{
-	size_t len;
-	const uint8_t *p;
-        if (sshbuf_peek_cstring(buf, &p, &len) &&
-            sshbuf_skip_string(buf)) {
-                if (valp) {
-                        *valp = xmalloc(len + 1);
-                        if (len) memcpy(*valp, p, len);
-                        (*valp)[len] = '\0';
-                }
-                if (lenp) *lenp = len;
-                return 1;
         }
-	if (valp) *valp = NULL;
-	if (lenp) *lenp = 0;
+	*valp = NULL;
 	return 0;
 }
 
@@ -944,7 +944,7 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
 {
         append_bar = (append_bar ? 1 : 0);
 
-        if (valp) *valp = NULL;
+        *valp = NULL;
         
         size_t len;
         const uint8_t *p;
@@ -1010,37 +1010,37 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                 return 0;
         }
 
-        if (valp) {
-                *valp = xwcsalloc(wlen + append_bar + 1);
-                if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                        (const char *)p, len, *valp, wlen) == wlen) {
-                        if (append_bar) {
-                                (*valp)[wlen] = '/';
-                                (*valp)[wlen + 1] = 0;
-                        }
-                        else
-                                (*valp)[wlen] = 0;
+        *valp = xwcsalloc(wlen + append_bar + 1);
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                (const char *)p, len, *valp, wlen) == wlen) {
+                if (append_bar) {
+                        (*valp)[wlen] = '/';
+                        (*valp)[wlen + 1] = 0;
                 }
-                else {
-                        tell_error("MultibyteToWideChar failed");
-                        xfree(*valp);
-                        *valp = NULL;
-                        return 0;
-                }
-        }
+                else
+                        (*valp)[wlen] = 0;
 
-	return  1;
+                return  1;
+
+        }
+        else {
+                tell_error("MultibyteToWideChar failed");
+                xfree(*valp);
+                *valp = NULL;
+                return 0;
+        }
 }
 
 static int
-sshbuf_get(struct sshbuf *buf, void *v, size_t len)
-{
-	const uint8_t *p = sshbuf_ptr(buf);
-	if (sshbuf_consume(buf, len)) {
-                if (v && len) memcpy(v, p, len);
-                return 1;
+sshbuf_get_two_paths(struct sshbuf *buf, wchar_t **path1, wchar_t **path2) {
+        if (sshbuf_get_path(buf, path1, 0)) {
+                if (sshbuf_get_path(buf, path2, 0))
+                        return 1;
+                xfree(*path1);
         }
-	return 0;
+        *path1 = NULL;
+        *path2 = NULL;
+        return 0;
 }
 
 static int
@@ -1682,7 +1682,7 @@ decode_attrib(struct sshbuf *b, Attrib *a)
                         return 0;
 
                 for (i = 0; i < count; i++) {
-                        if (!sshbuf_get_cstring(b, &type, NULL) ||
+                        if (!sshbuf_get_cstring(b, &type) ||
                             !sshbuf_get_string(b, &data, &dlen))
                                 return 0;
                         debug3("Got file attribute \"%.100s\" len %zu",
@@ -1936,48 +1936,32 @@ process_write(uint32_t id)
 	xfree(data);
 }
 
-// WORKING HERE!!!
-
 static void
-process_do_stat(uint32_t id, int do_lstat)
-{
-	Attrib a;
-	wchar_t *name;
-	int r, status = SSH2_FX_FAILURE;
+process_do_stat(uint32_t id, int do_lstat) {
 
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	// TODO: add support for lstat
 
-	debug3("request %u: %sstat", id, do_lstat ? "l" : "");
-	verbose("%sstat name \"%ls\"", do_lstat ? "l" : "", name);
-
-	// TODO: add lstat back
-	// r = do_lstat ? lstat(name, &st) : stat(name, &st);
+        wchar_t *name;
+	if (!sshbuf_get_path(iqueue, &name, 0))
+                return send_ok(id, 0);
 
 	BY_HANDLE_FILE_INFORMATION file_info;
 	if (GetFileInformationW(name, &file_info)) {
+                Attrib a;
 		file_info_to_attrib(&file_info, &a, name);
 		send_attrib(id, &a);
-		status = SSH2_FX_OK;
 	}
-	else
-		status = last_error_to_portable();
-
-	if (status != SSH2_FX_OK)
-		send_status(id, status);
-	
+	else send_ok(id, 0);
 	xfree(name);
 }
 
 static void
-process_stat(uint32_t id)
-{
+process_stat(uint32_t id) {
 	process_do_stat(id, 0);
 }
 
 static void
-process_lstat(uint32_t id)
-{
+process_lstat(uint32_t id) {
 	process_do_stat(id, 1);
 }
 
@@ -2001,56 +1985,56 @@ process_fstat(uint32_t id)
 static void
 process_setstat(uint32_t id)
 {
-	Attrib a;
 	wchar_t *name;
-	int r, status = SSH2_FX_OK;
+	if (!sshbuf_get_path(iqueue, &name, 0))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0 ||
-	    (r = decode_attrib(iqueue, &a)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+        int status = SSH2_FX_OK;
+        Attrib a;
+        if (!decode_attrib(iqueue, &a))
+                status = last_error_to_portable();
+        else {
+                if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
+                        logit("set \"%ls\" size %llu",
+                              name, (unsigned long long)a.size);
+                        
+                        HANDLE fd = CreateFileW(name, GENERIC_WRITE, 0,
+                                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                        if (fd == INVALID_HANDLE_VALUE)
+                                status = last_error_to_portable();
+                        else {
+                                LARGE_INTEGER off;
+                                off.QuadPart = a.size;
+                                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) || 
+                                    !SetEndOfFile(fd))
+                                        status = last_error_to_portable();
+                        }
+                }
+                if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
+                        logit("set \"%ls\" mode %04o", name, a.perm);
+                        status = SSH2_FX_OP_UNSUPPORTED;
+                        // FIXME: reimplement chmod
+                        // chmod(name, a.perm & 07777);
+                }
+                if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
+                        char buf[64];
+                        time_t t = a.mtime;
 
-	debug("request %u: setstat name \"%ls\"", id, name);
-	if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
-		logit("set \"%ls\" size %llu",
-		    name, (unsigned long long)a.size);
-		HANDLE fd = CreateFileW(name, GENERIC_WRITE, 0,
-					NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-		if (fd != INVALID_HANDLE_VALUE) {
-			LARGE_INTEGER off;
-			off.QuadPart = a.size;
-			if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) || 
-			    !SetEndOfFile(fd))
-				status = last_error_to_portable();
-		}
-		else
-			status = last_error_to_portable();
-	}
-	if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-		logit("set \"%ls\" mode %04o", name, a.perm);
-		// FIXME: reimplement chmod
-		// r = chmod(name, a.perm & 07777);
-		// if (r == -1)
-		// status = last_error_to_portable();
-	}
-	if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
-		char buf[64];
-		time_t t = a.mtime;
-
-		strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
-		    localtime(&t));
-		logit("set \"%ls\" modtime %s", name, buf);
-		if (!w_utimes(name, a.mtime, a.atime))
-			status = last_error_to_portable();
-	}
-	if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
-		logit("set \"%s\" owner %lu group %lu", name,
-                      (u_long)a.uid, (u_long)a.gid);
-                // FIXME: reimplement chown
-		//r = w_chown(name, a.uid, a.gid);
-		//if (r == -1)
-                //status = last_error_to_portable();
-	}
-	send_status(id, status);
+                        strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
+                                 localtime(&t));
+                        logit("set \"%ls\" modtime %s", name, buf);
+                        if (!w_utimes(name, a.mtime, a.atime))
+                                status = last_error_to_portable();
+                }
+                if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
+                        logit("set \"%s\" owner %lu group %lu", name,
+                              (u_long)a.uid, (u_long)a.gid);
+                        status = SSH2_FX_OP_UNSUPPORTED;
+                        // FIXME: reimplement chown
+                        //r = w_chown(name, a.uid, a.gid);
+                }
+        }
+        send_status(id, status);
 	xfree(name);
 }
 
@@ -2114,64 +2098,27 @@ process_fsetstat(uint32_t id)
 static void
 process_opendir(uint32_t id)
 {
-        HANDLE dd;
-	wchar_t *path, *pattern;
-	int r, handle, status = SSH2_FX_FAILURE;
+	wchar_t *path;
+        if (!sshbuf_get_path(iqueue, &path, 1))
+                return send_ok(id, 0);
+
         WIN32_FIND_DATAW find_data;
-
-	if ((r = sshbuf_get_path(iqueue, &path, 1)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_status(id, last_error_to_portable());
-                return;
-        }
-
-	debug3("request %u: opendir", id);
-
-	logit("opendir \"%ls\"", path);
-
-        pattern = xwcscat(path, L"*");
-        debug3("FindFistFileW(pattern=%ls)", pattern);
-
-        dd = FindFirstFileW(pattern, &find_data);
-        if (dd == INVALID_HANDLE_VALUE) {
-                tell_error("FindFirstFile failed");
-                status = last_error_to_portable();
-        }
-        else {
-                handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
-                if (handle < 0) {
-                        CloseHandle(dd);
-                } else {
+        wchar_t *pattern = xwcscat(path, L"*");
+        HANDLE dd = FindFirstFileW(pattern, &find_data);
+        debug3("FindFistFileW(pattern=%ls) -> h:0x%x", pattern, dd);
+        if (dd != INVALID_HANDLE_VALUE) {
+                int handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
+                if (handle >= 0) {
                         send_handle(id, handle);
-                        status = SSH2_FX_OK;
+                        goto cleanup;
                 }
+                CloseHandle(dd);
         }
+        send_ok(id, 0);
 
-        if (status != SSH2_FX_OK)
-                send_status(id, status);
-
-	xfree(path);
+cleanup:
         xfree(pattern);
-}
-
-static wchar_t *
-xprintf(const wchar_t *fmt, ...) {
-	size_t max = 100;
-	wchar_t *line = NULL;
-	while (1) {
-		line = xreallocarray(line, max, sizeof(wchar_t));
-		va_list args;
-		va_start(args, fmt);
-		HRESULT rc = StringCchVPrintfW(line, max, fmt, args);
-		va_end(args);
-		switch (rc) {
-		case S_OK:
-			return line;
-		case STRSAFE_E_INVALID_PARAMETER:
-			fatal_error("StringCchVprintf failed");
-		}
-		max *= 2;
-	}
+	xfree(path);
 }
 
 static void
@@ -2185,10 +2132,6 @@ process_readdir(uint32_t id)
 
         wchar_t *path = handle_to_name(hix);
         HANDLE dd = handle_to_win_handle(hix);
-        
-	if (dd == INVALID_HANDLE_VALUE || path == NULL)
-                return send_ok(id, 0);
-
         Stat stats;
         attrib_clear(&stats.attrib);
         
@@ -2293,68 +2236,48 @@ static void
 process_remove(uint32_t id)
 {
 	wchar_t *name;
-	int r;
-
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-
-	debug3("request %u: remove", id);
-	logit("remove name \"%s\"", name);
-        send_ok(id, DeleteFileW(name));
-	xfree(name);
+	if (sshbuf_get_path(iqueue, &name, 0)) {
+                send_ok(id, DeleteFileW(name));
+                xfree(name);
+        }
+        else send_ok(id, 0);
 }
 
 static void
 process_mkdir(uint32_t id)
 {
-	Attrib a;
-	wchar_t *name;
-	int r, mode;
+        wchar_t *name;
+	if (!sshbuf_get_path(iqueue, &name, 0))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0 ||
-	    (r = decode_attrib(iqueue, &a)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-
-	mode = (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) ?
-	    a.perm & 07777 : 0777;
-	debug3("request %u: mkdir", id);
-	logit("mkdir name \"%s\" mode 0%o", name, mode);
-        
-        // TODO: honor attributes
-        send_ok(id, CreateDirectoryW(name, NULL));
+        Attrib a;
+        if (!decode_attrib(iqueue, &a))
+                send_ok(id, 0);
+        else {
+                send_ok(id, CreateDirectoryW(name, NULL));
+                // TODO: honor attributes
+                // int mode = (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) ? a.perm & 07777 : 0777;
+        }
 	xfree(name);
 }
 
 static void
-process_rmdir(uint32_t id)
-{
+process_rmdir(uint32_t id) {
 	wchar_t *name;
-	int r;
+	if (!sshbuf_get_path(iqueue, &name, 0))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_path(iqueue, &name, 0)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
-
-	debug3("request %u: rmdir", id);
-	logit("rmdir name \"%s\"", name);
         send_status(id, RemoveDirectoryW(name));
 	xfree(name);
 }
 
 static void
-process_realpath(uint32_t id)
-{
+process_realpath(uint32_t id) {
 	wchar_t *path = NULL;
-        int status = SSH2_FX_FAILURE;
-	int r;
+	if (!sshbuf_get_path(iqueue, &path, 0))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_path(iqueue, &path, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_ok(id, 0);
-        }
-                
-	debug3("request %u: realpath", id);
-	verbose("realpath \"%ls\"", path);
-        
+        int ok = 0;
         DWORD len = GetFullPathNameW(path, 0, NULL, NULL);
         if (len) {
                 wchar_t *fullpath = xwcsalloc(len);
@@ -2370,64 +2293,41 @@ process_realpath(uint32_t id)
                                         s.name = longpath;
                                         s.long_name = xwcsdup(L"");
                                         send_names(id, 1, &s);
-                                        status = SSH2_FX_OK;
+                                        ok = 1;
                                 }
-                                else
-                                        tell_error("GetLongPathNameW failed (2)");
+                                else tell_error("GetLongPathNameW failed (2)");
                                 xfree(longpath);
                         }
-                        else
-                                tell_error("GetLongPathNameW failed (1)");
+                        else tell_error("GetLongPathNameW failed (1)");
                 }
-                else
-                        tell_error("GetFullPathNameW failed (2)");
+                else tell_error("GetFullPathNameW failed (2)");
                 xfree(fullpath);
         }
-        else
-                tell_error("GetFullPathNameW failed (1)");
+        else tell_error("GetFullPathNameW failed (1)");
         
-        if (status != SSH2_FX_OK)
-		send_status(id, last_error_to_portable());
+        if (!ok) send_ok(id, 0);
 	xfree(path);
 }
 
 static void
-process_rename(uint32_t id)
-{
+process_rename(uint32_t id) {
 	wchar_t *oldpath, *newpath;
-	int r;
+	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
-	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_ok(id, 0);
-        }
-
-	debug3("request %u: rename", id);
-	logit("rename old \"%s\" new \"%s\"", oldpath, newpath);
-
-	send_ok(id, MoveFileW(oldpath, newpath));
-
+        send_ok(id, MoveFileW(oldpath, newpath));
+        xfree(newpath);
 	xfree(oldpath);
-	xfree(newpath);
 }
 
 static void
 process_readlink(uint32_t id)
 {
-	int r;
 	wchar_t *path;
-
-	if ((r = sshbuf_get_path(iqueue, &path, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_ok(id, 0);
-        }
-
-        debug3("request %u: readlink", id);
-        verbose("readlink \"%s\" (unsupported)", path);
+	if (!sshbuf_get_path(iqueue, &path, 0))
+                return send_ok(id, 0);
 
         send_status(id, SSH2_FX_OP_UNSUPPORTED);
-
 	xfree(path);
 }
 
@@ -2435,40 +2335,21 @@ static void
 process_symlink(uint32_t id)
 {
 	wchar_t *oldpath, *newpath;
-	int r;
+	if (sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
-	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_ok(id, 0);
-        }
-
-	debug3("request %u: symlink", id);
-	logit("symlink old \"%s\" new \"%s\" (unsupported)", oldpath, newpath);
-
-	send_status(id, SSH2_FX_OP_UNSUPPORTED);
-
+        send_status(id, SSH2_FX_OP_UNSUPPORTED);
+        xfree(newpath);
 	xfree(oldpath);
-	xfree(newpath);
 }
 
 static void
 process_extended_posix_rename(uint32_t id)
 {
 	wchar_t *oldpath, *newpath;
-	int r;
-
-	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
-	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_ok(id, 0);
-        }
-
-	debug3("request %u: posix-rename", id);
-	logit("posix-rename old \"%s\" new \"%s\"", oldpath, newpath);
-
+	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
+                return send_ok(id, 0);
         send_ok(id, MoveFileW(oldpath, newpath));
-
 	xfree(oldpath);
 	xfree(newpath);
 }
@@ -2477,19 +2358,9 @@ static void
 process_extended_hardlink(uint32_t id)
 {
 	wchar_t *oldpath, *newpath;
-	int r;
-
-	if ((r = sshbuf_get_path(iqueue, &oldpath, 0)) != 0 ||
-	    (r = sshbuf_get_path(iqueue, &newpath, 0)) != 0) {
-                tell_error("sshbuf_get_path failed");
-                send_ok(id, 0);
-        }
-
-	debug3("request %u: hardlink", id);
-	logit("hardlink old \"%ls\" new \"%ls\"", oldpath, newpath);
-
+	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
+                return send_ok(id, 0);
         send_ok(id, CreateHardLinkW(newpath, oldpath, NULL));
-
 	xfree(oldpath);
 	xfree(newpath);
 }
@@ -2498,20 +2369,19 @@ static void
 process_extended_fsync(uint32_t id)
 {
         HANDLE fd;
-	if (get_win_handle(iqueue, HANDLE_FILE, &fd))
-                return send_ok(id, FlushFileBuffers(fd));
-        
-        send_ok(id, 0);
+	if (!get_win_handle(iqueue, HANDLE_FILE, &fd))
+                return send_ok(id, 0);
+        send_ok(id, FlushFileBuffers(fd));
 }
 
 static void
 process_extended(uint32_t id)
 {
 	char *request;
-	int i, r;
+	if (!sshbuf_get_cstring(iqueue, &request))
+                return send_ok(id, 0);
 
-	if ((r = sshbuf_get_cstring(iqueue, &request, NULL)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+        int i;
 	for (i = 0; extended_handlers[i].handler != NULL; i++) {
 		if (strcmp(request, extended_handlers[i].ext_name) == 0) {
 			/* if (!request_permitted(&extended_handlers[i])) */
@@ -2521,13 +2391,13 @@ process_extended(uint32_t id)
 			/* break; */
 
 			extended_handlers[i].handler(id);
-			break;
+                        goto cleanup;
 		}
 	}
-	if (extended_handlers[i].handler == NULL) {
-		error("Unknown extended request \"%.100s\"", request);
-		send_status(id, SSH2_FX_OP_UNSUPPORTED);	/* MUST */
-	}
+        error("Unknown extended request \"%.100s\"", request);
+        send_status(id, SSH2_FX_OP_UNSUPPORTED);	/* MUST */
+
+cleanup:
 	xfree(request);
 }
 
@@ -2536,49 +2406,35 @@ process_extended(uint32_t id)
 static void
 process(void)
 {
-	uint msg_len;
-	uint buf_len;
-	uint consumed;
-	uint8_t type;
-	const uint8_t *cp;
-	int i, r;
-	uint32_t id;
-
-	buf_len = sshbuf_len(iqueue);
-	if (buf_len < 5)
-		return;		/* Incomplete message. */
-	cp = sshbuf_ptr(iqueue);
-	msg_len = get_u32(cp);
-	if (msg_len > SFTP_MAX_MSG_LENGTH) {
-		error("bad message from %s local user %s",
-		    client_addr, NULL);
-		cleanup_exit(11);
-	}
-	if (buf_len < msg_len + 4)
-		return;
-	if ((r = sshbuf_consume(iqueue, 4)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	uint buf_len = sshbuf_len(iqueue);
+	if (buf_len < 4) return;		/* Incomplete message. */
+        
+	const uint8_t *cp = sshbuf_ptr(iqueue);
+	uint msg_len = get_u32(cp);
+	if (msg_len > SFTP_MAX_MSG_LENGTH)
+		fatal("message too long (%dbytes, max: %d)", msg_len, SFTP_MAX_MSG_LENGTH);
+	if (buf_len < msg_len + 4) return;
+        
+	if (!sshbuf_consume(iqueue, 4))
+		fatal("%s: buffer error", __func__);
 	buf_len -= 4;
-	if ((r = sshbuf_get_u8(iqueue, &type)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
 
-	switch (type) {
-	case SSH2_FXP_INIT:
-		process_init();
-		init_done = 1;
-		break;
-	case SSH2_FXP_EXTENDED:
-		if (!init_done)
-			fatal("Received extended request before init");
-		if ((r = sshbuf_get_u32(iqueue, &id)) != 0)
-			fatal("%s: buffer error: %d", __func__, r);
-		process_extended(id);
-		break;
-	default:
-		if (!init_done)
+        uint8_t type;
+	if (!sshbuf_get_u8(iqueue, &type))
+		fatal("%s: buffer error", __func__);
+
+        if (type == SSH2_FXP_INIT) {
+                process_init();
+                init_done = 1;
+        }
+        else {
+                if (!init_done)
 			fatal("Received %u request before init", type);
-		if ((r = sshbuf_get_u32(iqueue, &id)) != 0)
-			fatal("%s: buffer error: %d", __func__, r);
+                uint32_t id;
+                if (!sshbuf_get_u32(iqueue, &id))
+			fatal("%s: buffer error", __func__);
+
+                int i;
 		for (i = 0; handlers[i].handler != NULL; i++) {
 			if (type == handlers[i].type) {
 				// TODO: reintroduce request_permitted
@@ -2598,18 +2454,16 @@ process(void)
 			error("Unknown message %u", type);
 	}
 	/* discard the remaining bytes from the current packet */
-	if (buf_len < sshbuf_len(iqueue)) {
-		error("iqueue grew unexpectedly");
-		cleanup_exit(255);
-	}
-	consumed = buf_len - sshbuf_len(iqueue);
-	if (msg_len < consumed) {
-		error("msg_len %u < consumed %u", msg_len, consumed);
-		cleanup_exit(255);
-	}
+	if (buf_len < sshbuf_len(iqueue))
+		fatal("iqueue grew unexpectedly");
+
+	int consumed = buf_len - sshbuf_len(iqueue);
+	if (msg_len < consumed)
+		fatal("msg_len %u < consumed %u", msg_len, consumed);
+
 	if (msg_len > consumed &&
-	    (r = sshbuf_consume(iqueue, msg_len - consumed)) != 0)
-		fatal("%s: buffer error: %d", __func__, r);
+	    !sshbuf_consume(iqueue, msg_len - consumed))
+                fatal("%s: buffer error", __func__);
 }
 
 /* Cleanup handler that logs active handles upon normal exit */
@@ -2776,7 +2630,7 @@ percent_expand(const char *string, ...)
 int
 main(int argc, char **argv)
 {
-	int i, r, ch, skipargs = 0;
+	int i, ch, skipargs = 0;
 	char *cp, *homedir = NULL, buf[4*4096];
 
 	HANDLE in, out;
@@ -2883,27 +2737,27 @@ main(int argc, char **argv)
 	}
 	for (;;) {
 		DWORD olen, bytes;
-		if (sshbuf_check_reserve(oqueue, SFTP_MAX_MSG_LENGTH) == 0)
+		if (sshbuf_check_reserve(oqueue, SFTP_MAX_MSG_LENGTH))
 			process();
 
 		olen = sshbuf_len(oqueue);
 		if (olen > 0) {
 			if (WriteFile(out, sshbuf_ptr(oqueue), olen, &bytes, NULL)) {
-				if ((r = sshbuf_consume(oqueue, bytes)) != 0)
-					fatal("%s: buffer error: %d", __func__, r);
+				if (!sshbuf_consume(oqueue, bytes))
+					fatal("%s: buffer error", __func__);
 				continue;
 			}
 			else
 				fatal("%s: WriteFile failed: %lu", __func__, GetLastError());
 		}
 
-		if ((r = sshbuf_check_reserve(iqueue, sizeof(buf))) != 0)
-			fatal("%s: sshbuf_check_reserve failed: %d", __func__, r);
+		if (!sshbuf_check_reserve(iqueue, sizeof(buf)))
+                        fatal("%s: sshbuf_check_reserve failed", __func__);
 
 		if (ReadFile(in, buf, sizeof(buf), &bytes, NULL)) {
 			if (bytes > 0) {
-				if ((r = sshbuf_put(iqueue, buf, bytes)) != 0)
-					fatal("%s: buffer error: %d", __func__, r);
+				if (!sshbuf_put(iqueue, buf, bytes))
+					fatal("%s: buffer error", __func__);
 			}
 			else {
 				debug("read eof");
