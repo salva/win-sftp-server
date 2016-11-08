@@ -1223,9 +1223,8 @@ sshbuf_reset(struct sshbuf *buf)
 /* } */
 
 static int
-last_error_to_portable(void)
-{
-	switch (GetLastError()) {
+win_error_to_portable(int win_error) {
+	switch (win_error) {
 	case ERROR_SUCCESS:
 		return SSH2_FX_OK;
 
@@ -1249,6 +1248,14 @@ last_error_to_portable(void)
 	default:
 		return SSH2_FX_FAILURE;
 	}
+}
+
+static int
+last_error_to_portable(void) {
+	int last_error = GetLastError();
+	int rc = win_error_to_portable(last_error);
+	debug3("last error %d converted to portable %d", last_error, rc);
+	return rc;
 }
 
 /* handle handles */
@@ -1378,11 +1385,6 @@ GetFileInformationW(wchar_t *name, BY_HANDLE_FILE_INFORMATION *file_info) {
             CloseHandle(h))
                 return 1;
 	return 0;
-}
-
-static int
-w_ftruncate(HANDLE h, off_t length) {
-        return -1;
 }
 
 Handle *handles = NULL;
@@ -1802,7 +1804,9 @@ process_open(uint32_t id)
                 status = SSH2_FX_PERMISSION_DENIED;
         }
         else {
-		fd = CreateFileW(name, access, 0, NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
+		fd = CreateFileW(name, access,
+				 FILE_SHARE_DELETE|FILE_SHARE_READ|FILE_SHARE_WRITE,
+				 NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (fd == INVALID_HANDLE_VALUE) {
 			status = last_error_to_portable();
 		} else {
@@ -1901,21 +1905,29 @@ process_write(uint32_t id)
                 return send_ok(id, 0);
 
 	HANDLE fd = handle_to_win_handle(hix);
-        if (!(handle_to_flags(hix) & SSH2_FXF_APPEND)) {
-                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN))
-                        return send_ok(id, 0);
-        }
+	int whence;
+        if ((handle_to_flags(hix) & SSH2_FXF_APPEND)) {
+		whence = FILE_END;
+		off.QuadPart = 0;
+	}
+	else
+		whence = FILE_BEGIN;
 
-	uint8_t *data;        
+	if (!SetFilePointerEx(fd, off, NULL, whence))
+		return send_ok(id, 0);
+
+	uint8_t *data;
         if (!sshbuf_get_string(iqueue, &data, &len))
                 return send_ok(id, 0);
-	
+
+	debug3("writting data, %ld bytes", len);
+	uint8_t *p = data;
         int status = SSH2_FX_FAILURE;
         while (len) {
                 DWORD written;
-                if (WriteFile(fd, data, len, &written, NULL)) {
+                if (WriteFile(fd, p, len, &written, NULL)) {
                         if (written <= len) {
-                                data += written;
+                                p += written;
                                 len -= written;
                         } else {
                                 error("Internal error: too much data written (%d)", written);
@@ -1928,7 +1940,6 @@ process_write(uint32_t id)
                         status = last_error_to_portable();
                         break;
                 }
-                
         }
         if (len == 0)
                 status = SSH2_FX_OK;
@@ -1997,8 +2008,9 @@ process_setstat(uint32_t id)
                 if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
                         logit("set \"%ls\" size %llu",
                               name, (unsigned long long)a.size);
-                        
-                        HANDLE fd = CreateFileW(name, GENERIC_WRITE, 0,
+
+                        HANDLE fd = CreateFileW(name, GENERIC_WRITE,
+						FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                                                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
                         if (fd == INVALID_HANDLE_VALUE)
                                 status = last_error_to_portable();
@@ -2046,7 +2058,7 @@ process_fsetstat(uint32_t id)
 	if (!get_handle(iqueue, HANDLE_DIR|HANDLE_FILE, &handle) ||
             !decode_attrib(iqueue, &a))
                 return send_ok(id, 0);
-        
+
         debug("request %u: fsetstat handle %d", id, handle);
 
         HANDLE fd = handle_to_win_handle(handle);
@@ -2056,7 +2068,10 @@ process_fsetstat(uint32_t id)
         if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
                 logit("set \"%s\" size %llu",
                       name, (unsigned long long)a.size);
-                if (!w_ftruncate(fd, a.size))
+		LARGE_INTEGER off;
+		off.QuadPart = a.size;
+		if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) ||
+		    !SetEndOfFile(fd))
                         status = last_error_to_portable();
         }
         if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
@@ -2290,6 +2305,11 @@ process_realpath(uint32_t id) {
                                 if (len1 && len1 < len) {
                                         Stat s;
                                         attrib_clear(&s.attrib);
+					size_t i;
+					for (i = 0; i < len; i++) {
+						if (longpath[i] == '\\')
+							longpath[i] = '/';
+					}
                                         s.name = longpath;
                                         s.long_name = xwcsdup(L"");
                                         send_names(id, 1, &s);
@@ -2360,6 +2380,7 @@ process_extended_hardlink(uint32_t id)
 	wchar_t *oldpath, *newpath;
 	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
                 return send_ok(id, 0);
+	debug3("calling CreateHardLinkW");
         send_ok(id, CreateHardLinkW(newpath, oldpath, NULL));
 	xfree(oldpath);
 	xfree(newpath);
@@ -2371,6 +2392,7 @@ process_extended_fsync(uint32_t id)
         HANDLE fd;
 	if (!get_win_handle(iqueue, HANDLE_FILE, &fd))
                 return send_ok(id, 0);
+	debug3("calling FlushFileBuffers");
         send_ok(id, FlushFileBuffers(fd));
 }
 
