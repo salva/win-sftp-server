@@ -1705,7 +1705,7 @@ send_names(uint32_t id, int count, const Stat *stats)
 	    !sshbuf_put_u32(msg, count))
 		fatal("%s: buffer error", __func__);
 	debug("request %u: sent names count %d", id, count);
-        
+
         int i;
 	for (i = 0; i < count; i++) {
 		if (!sshbuf_put_path(msg, stats[i].name) ||
@@ -1740,11 +1740,11 @@ process_init(void)
 {
 	if (!sshbuf_get_u32(iqueue, &version))
 		fatal("%s: buffer error", __func__);
-        
+
 	verbose("received client version %u", version);
         if (version < SSH2_FXP_VERSION)
                 fatal("unsupported protocol version requested");
-        
+
 	struct sshbuf *msg = sshbuf_new();
 	if (!sshbuf_put_u8(msg, SSH2_FXP_VERSION) ||
 	    !sshbuf_put_u32(msg, SSH2_FILEXFER_VERSION) ||
@@ -1973,7 +1973,7 @@ process_stat(uint32_t id) {
 
 static void
 process_lstat(uint32_t id) {
-	process_do_stat(id, 1);
+	sent_status(id, SSH2_FX_OP_UNSUPPORTED);
 }
 
 static void
