@@ -15,6 +15,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#define _WIN32_WINNT   0x0600
+
 #include <windows.h>
 #include <strsafe.h>
 #include <aclapi.h>
@@ -26,6 +28,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <wchar.h>
+#include <ntdef.h>
+#include <winbase.h>
 
 #define	SSH2_FILEXFER_VERSION		3
 
@@ -454,7 +458,6 @@ static wchar_t *
 xwcscat(wchar_t *str, wchar_t *cat) {
         size_t str_len = wcslen(str);
         size_t cat_len = wcslen(cat);
-        
         wchar_t *cp = xwcsalloc(str_len + cat_len + 1);
         wmemcpy(cp, str, str_len);
         wmemcpy(cp + str_len, cat, cat_len + 1);
@@ -1379,7 +1382,9 @@ GetFileInformationW(wchar_t *name, BY_HANDLE_FILE_INFORMATION *file_info) {
 	HANDLE h = CreateFileW(name,
 			       FILE_READ_ATTRIBUTES,
 			       FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-			       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+			       NULL, OPEN_EXISTING,
+			       FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+			       NULL);
         if ((h != INVALID_HANDLE_VALUE) &&
             GetFileInformationByHandle(h, file_info) &&
             CloseHandle(h))
@@ -1947,33 +1952,94 @@ process_write(uint32_t id)
 	xfree(data);
 }
 
+static wchar_t *
+ReadSymbolicLink(HANDLE h) {
+	REPARSE_DATA_BUFFER buffer;
+	DWORD dummy;
+	debug3("Calling ReadSymbolicLink");
+	if (DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, &buffer,
+			    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, &dummy, NULL)) {
+		int offset, len;
+		char *p = NULL;
+		debug3("ReparseTag: %ld", (long)buffer.ReparseTag);
+		switch (buffer.ReparseTag) {
+		case IO_REPARSE_TAG_SYMLINK:
+			offset = buffer.SymbolicLinkReparseBuffer.SubstituteNameOffset;
+			len = buffer.SymbolicLinkReparseBuffer.SubstituteNameLength;
+			p = (char*) buffer.SymbolicLinkReparseBuffer.PathBuffer;
+			break;
+
+		case IO_REPARSE_TAG_MOUNT_POINT:
+			offset = buffer.MountPointReparseBuffer.SubstituteNameOffset;
+			len = buffer.MountPointReparseBuffer.SubstituteNameLength;
+			p = (char*) buffer.MountPointReparseBuffer.PathBuffer;
+			break;
+
+		default:
+			return NULL;
+		}
+
+		p += offset;
+
+		int wlen = len / sizeof(wchar_t);
+		wchar_t *path = xwcsalloc(wlen + 1);
+		memcpy(path, p, len);
+		path[wlen] = 0;
+		return path;
+	}
+	return NULL;
+}
+
 static void
-process_do_stat(uint32_t id, int do_lstat) {
+process_do_stat(uint32_t id, int follow) {
 
 	// TODO: add support for lstat
 
-        wchar_t *name;
+        wchar_t *name = NULL;
 	if (!sshbuf_get_path(iqueue, &name, 0))
                 return send_ok(id, 0);
 
 	BY_HANDLE_FILE_INFORMATION file_info;
-	if (GetFileInformationW(name, &file_info)) {
-                Attrib a;
-		file_info_to_attrib(&file_info, &a, name);
-		send_attrib(id, &a);
+	while (1) {
+		HANDLE h = CreateFileW(name,
+				       FILE_READ_ATTRIBUTES,
+				       FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+				       NULL, OPEN_EXISTING,
+				       FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+				       NULL);
+		if (h == INVALID_HANDLE_VALUE) goto fail;
+		if (!GetFileInformationByHandle(h, &file_info)) goto fail;
+		if (follow && file_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+			wchar_t *link = ReadSymbolicLink(h);
+			CloseHandle(h);
+			if (!link) goto fail;
+			xfree(name);
+			name = link;
+			continue;
+		}
+		CloseHandle(h);
+		break;
 	}
-	else send_ok(id, 0);
+
+	Attrib a;
+	file_info_to_attrib(&file_info, &a, name);
+	send_attrib(id, &a);
+	goto cleanup;
+
+fail:
+	send_ok(id, 0);
+cleanup:
 	xfree(name);
 }
 
 static void
 process_stat(uint32_t id) {
-	process_do_stat(id, 0);
+	process_do_stat(id, 1);
 }
 
 static void
 process_lstat(uint32_t id) {
-	sent_status(id, SSH2_FX_OP_UNSUPPORTED);
+	process_do_stat(id, 0);
 }
 
 static void
@@ -2341,24 +2407,30 @@ process_rename(uint32_t id) {
 }
 
 static void
-process_readlink(uint32_t id)
-{
+process_readlink(uint32_t id) {
 	wchar_t *path;
 	if (!sshbuf_get_path(iqueue, &path, 0))
-                return send_ok(id, 0);
+		return send_ok(id, 0);
 
-        send_status(id, SSH2_FX_OP_UNSUPPORTED);
+	wchar_t *link = ReadSymbolicLink(path);
+	if (link) {
+		Stat s;
+		attrib_clear(&s.attrib);
+		s.name = link;
+		s.long_name = L"";
+		send_names(id, 1, &s);
+	}
+	else send_status(id, 0);
 	xfree(path);
 }
 
 static void
-process_symlink(uint32_t id)
-{
+process_symlink(uint32_t id) {
 	wchar_t *oldpath, *newpath;
-	if (sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
+	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
                 return send_ok(id, 0);
-
-        send_status(id, SSH2_FX_OP_UNSUPPORTED);
+	debug3("CreateSymbolicLink(new: %ls, old: %ls)", newpath, oldpath);
+	send_ok(id, CreateSymbolicLinkW(newpath, oldpath, 0));
         xfree(newpath);
 	xfree(oldpath);
 }

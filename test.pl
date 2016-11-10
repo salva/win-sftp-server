@@ -112,4 +112,8 @@ ok (!defined <$rfh2>, "reading at EOF");
 ok $s->seek($rfh2, 0, 0), "seek to beginning";
 my $data3 = do { undef $/; <$rfh2> };
 is ($data3, $data, "reread from the beginning");
+
+ok($s->symlink("sl1-$rfn", $s->realpath($rfn)));
+#ok($s->symlink("sl1-$rfn", $rfn));
+
 done_testing();
