@@ -10,13 +10,31 @@ use Net::SFTP::Foreign::Constants qw(:flags);
 
 my $save_err;
 my $temp = "c:/temp";
+my $wine;
+my $delay = 0;
 
 GetOptions("save-err|s" => \$save_err,
-           "working-dir|w=s" => \$temp);
+           "working-dir|w=s" => \$temp,
+           "wine|i" => \$wine,
+           "delay|d=i" => \$delay);
 
+sub path_to_wine {
+    my ($path) = @_;
+    if ($wine) {
+        $path =~ s{^([a-z]):}{"$ENV{HOME}/.wine/drive_" . lc $1}ei;
+        diag "path $_[0] converted to $path";
+    }
+    return $path;
+}
+
+my $local_temp = path_to_wine $temp;
 my $remote_dir = "w";
-my $local_dir = "$temp/$remote_dir"; 
+my $local_dir = "$local_temp/$remote_dir";
+
 my $exe = File::Spec->rel2abs("a.exe");
+my @cmd = $exe;
+unshift @cmd, 'wine' if $wine;
+
 my $errfh;
 if ($save_err) {
     open $errfh, ">sftp-server-stderr.txt";
@@ -25,21 +43,26 @@ else {
     $save_err = \*STDERR;
 }
 
-mkdir $temp;
-ok -d $temp;
-ok(chdir "c:/temp");
-my $s = Net::SFTP::Foreign->new(open2_cmd => $exe, stderr_fh => $errfh);
+mkdir $local_temp;
+ok -d $local_temp;
+ok(chdir $local_temp);
+
+
+my $s = Net::SFTP::Foreign->new(open2_cmd => \@cmd, stderr_fh => $errfh);
+diag "child pid: $s->{pid}";
+sleep $delay;
+
 ok($s->test_d("c:/temp"), "temp directory exists");
 ok($s->test_d("c:\\temp"), "forward and back slashes are equivalent");
 ok($s->test_d("C:\\tEmP"), "case does not matter either");
 
 $s->mkdir($remote_dir);
 ok -d $local_dir, "local dir is $local_dir";
-is ($s->realpath($remote_dir), $local_dir, "realpath");
+is (path_to_wine($s->realpath($remote_dir)), $local_dir, "realpath");
 
 ok $s->test_d($remote_dir), "remote working dir exists";
 ok $s->setcwd($remote_dir), "setcwd";
-is ($s->realpath("."), $local_dir, "realpath");
+is (path_to_wine($s->realpath(".")), $local_dir, "realpath");
 
 my $rfn = "data.txt";
 my $rfh = $s->open($rfn, SSH2_FXF_WRITE | SSH2_FXF_CREAT | SSH2_FXF_TRUNC);
@@ -82,7 +105,10 @@ ok ($s->test_e("r-$rfn"), "new file is there");
 ok ($s->hardlink($rfn, "r-$rfn"), "hardlink");
 ok ($s->test_e($rfn), "old file is there again");
 ok ($s->remove("r-$rfn"), "unlink");
-ok (!$s->test_e("r-$rfn"), "new file is finally gone");
+SKIP: {
+    skip "DeleteFileW is lazy in Wine", 1 if $wine;
+    ok (!$s->test_e("r-$rfn"), "new file is finally gone");
+};
 
 my $data1 = do { undef $/; <$rfh2> };
 is ($data1, $data, "read");
@@ -113,7 +139,18 @@ ok $s->seek($rfh2, 0, 0), "seek to beginning";
 my $data3 = do { undef $/; <$rfh2> };
 is ($data3, $data, "reread from the beginning");
 
-ok($s->symlink("sl1-$rfn", $s->realpath($rfn)));
+$s->remove("sl1-$rfn");
+ok(!$s->test_e("sl1-$rfn"), "symbolic link does not exist");
+ok($s->symlink("sl1-$rfn", $s->realpath($rfn)), "abs symlink");
 #ok($s->symlink("sl1-$rfn", $rfn));
+is($s->readlink("sl1-$rfn"), $s->realpath($rfn));
+
+$s->remove("sl2-$rfn");
+ok(!$s->test_e("sl2-$rfn"), "symbolic link does not exist");
+ok($s->symlink("sl2-$rfn", $rfn), "relative symlink");
+is($s->readlink("sl2-$rfn"), $rfn, "read relative symlink");
+    
+
+
 
 done_testing();

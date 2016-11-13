@@ -1954,40 +1954,59 @@ process_write(uint32_t id)
 
 static wchar_t *
 ReadSymbolicLink(HANDLE h) {
-	REPARSE_DATA_BUFFER buffer;
-	DWORD dummy;
-	debug3("Calling ReadSymbolicLink");
-	if (DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, &buffer,
-			    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, &dummy, NULL)) {
-		int offset, len;
-		char *p = NULL;
-		debug3("ReparseTag: %ld", (long)buffer.ReparseTag);
-		switch (buffer.ReparseTag) {
-		case IO_REPARSE_TAG_SYMLINK:
-			offset = buffer.SymbolicLinkReparseBuffer.SubstituteNameOffset;
-			len = buffer.SymbolicLinkReparseBuffer.SubstituteNameLength;
-			p = (char*) buffer.SymbolicLinkReparseBuffer.PathBuffer;
-			break;
+        wchar_t *path = NULL;
+        size_t buffer_size = 1024;
+        REPARSE_DATA_BUFFER *buffer = NULL;
+        while (1) {
+                DWORD bytes_returned;
+                buffer = xrealloc(buffer, buffer_size);
+                debug3("Calling DeviceIOControl, buffer_size: %ld", buffer_size);
+                if (DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, buffer,
+                                    buffer_size, &bytes_returned, NULL)) break;
+                
+                int error = GetLastError();
+                if (buffer_size > 10 * MAXIMUM_REPARSE_DATA_BUFFER_SIZE ||
+                    (error != ERROR_INSUFFICIENT_BUFFER &&
+                     error != ERROR_MORE_DATA)) {
+                        debug("DeviceIOControl failed, handle: 0x%x error: %ld", h, GetLastError());
+                        goto cleanup;
+                }
+                buffer_size *= 2;
+        }
 
-		case IO_REPARSE_TAG_MOUNT_POINT:
-			offset = buffer.MountPointReparseBuffer.SubstituteNameOffset;
-			len = buffer.MountPointReparseBuffer.SubstituteNameLength;
-			p = (char*) buffer.MountPointReparseBuffer.PathBuffer;
-			break;
+        int offset, len;
+        char *p = NULL;
+        debug3("ReparseTag: %ld", (long)buffer->ReparseTag);
+        switch (buffer->ReparseTag) {
+        case IO_REPARSE_TAG_SYMLINK:
+                offset = buffer->SymbolicLinkReparseBuffer.SubstituteNameOffset;
+                len = buffer->SymbolicLinkReparseBuffer.SubstituteNameLength;
+                p = (char*) buffer->SymbolicLinkReparseBuffer.PathBuffer;
+                break;
 
-		default:
-			return NULL;
-		}
+        case IO_REPARSE_TAG_MOUNT_POINT:
+                offset = buffer->MountPointReparseBuffer.SubstituteNameOffset;
+                len = buffer->MountPointReparseBuffer.SubstituteNameLength;
+                p = (char*) buffer->MountPointReparseBuffer.PathBuffer;
+                break;
 
-		p += offset;
+        default:
+                debug("unknown reparse tag %ld", buffer->ReparseTag);
+                SetLastError(ERROR_NOT_SUPPORTED);
+                goto cleanup;
+        }
 
-		int wlen = len / sizeof(wchar_t);
-		wchar_t *path = xwcsalloc(wlen + 1);
-		memcpy(path, p, len);
-		path[wlen] = 0;
-		return path;
-	}
-	return NULL;
+        p += offset;
+
+        int wlen = len / sizeof(wchar_t);
+        path = xwcsalloc(wlen + 1);
+        memcpy(path, p, len);
+        path[wlen] = 0;
+        debug("readlink: %ls", path);
+
+cleanup:
+        xfree(buffer);
+        return path;
 }
 
 static void
@@ -2005,14 +2024,24 @@ process_do_stat(uint32_t id, int follow) {
 				       FILE_READ_ATTRIBUTES,
 				       FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
 				       NULL, OPEN_EXISTING,
-				       FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+				       FILE_FLAG_BACKUP_SEMANTICS, //|FILE_FLAG_OPEN_REPARSE_POINT,
 				       NULL);
-		if (h == INVALID_HANDLE_VALUE) goto fail;
-		if (!GetFileInformationByHandle(h, &file_info)) goto fail;
+		if (h == INVALID_HANDLE_VALUE) {
+                        send_ok(id, 0);
+                        goto cleanup;
+                }
+		if (!GetFileInformationByHandle(h, &file_info)) {
+                        send_ok(id, 0);
+                        CloseHandle(h);
+                        goto cleanup;
+                }
 		if (follow && file_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
 			wchar_t *link = ReadSymbolicLink(h);
-			CloseHandle(h);
-			if (!link) goto fail;
+                        if (!link) {
+                                send_ok(id, 0);
+                                CloseHandle(h);
+                                goto cleanup;
+                        }
 			xfree(name);
 			name = link;
 			continue;
@@ -2024,10 +2053,7 @@ process_do_stat(uint32_t id, int follow) {
 	Attrib a;
 	file_info_to_attrib(&file_info, &a, name);
 	send_attrib(id, &a);
-	goto cleanup;
 
-fail:
-	send_ok(id, 0);
 cleanup:
 	xfree(name);
 }
@@ -2411,16 +2437,34 @@ process_readlink(uint32_t id) {
 	wchar_t *path;
 	if (!sshbuf_get_path(iqueue, &path, 0))
 		return send_ok(id, 0);
-
-	wchar_t *link = ReadSymbolicLink(path);
-	if (link) {
-		Stat s;
-		attrib_clear(&s.attrib);
-		s.name = link;
-		s.long_name = L"";
-		send_names(id, 1, &s);
-	}
-	else send_status(id, 0);
+        
+        HANDLE h = CreateFileW(path,
+                               FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING,
+                               FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+                               NULL);
+        if (h == INVALID_HANDLE_VALUE)
+                send_ok(id, 0);
+        else {
+                wchar_t *link = ReadSymbolicLink(h);
+                if (link) {
+                        Stat s;
+                        attrib_clear(&s.attrib);
+                        s.long_name = L"";
+                        s.name = link;
+                        if (wcsncmp(link, L"\\??\\", 4) == 0)
+                                s.name += 4;
+                        size_t i;
+                        for (i = 0; s.name[i]; i++) {
+                                if (s.name[i] == '\\')
+                                        s.name[i] = '/';
+                        }
+                        send_names(id, 1, &s);
+                }
+                else send_ok(id, 0);
+                CloseHandle(h);
+        }
 	xfree(path);
 }
 
