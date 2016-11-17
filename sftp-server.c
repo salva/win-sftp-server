@@ -2069,7 +2069,7 @@ process_do_stat(uint32_t id, int follow) {
 
 	BY_HANDLE_FILE_INFORMATION file_info;
         HANDLE h = CreateFileW(name,
-                               FILE_READ_ATTRIBUTES,
+                               FILE_READ_ATTRIBUTES|READ_CONTROL,
                                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                                NULL, OPEN_EXISTING,
                                FILE_FLAG_BACKUP_SEMANTICS | (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT),

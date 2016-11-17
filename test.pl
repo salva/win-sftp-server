@@ -149,7 +149,11 @@ $s->remove("sl2-$rfn");
 ok(!$s->test_e("sl2-$rfn"), "symbolic link does not exist");
 ok($s->symlink("sl2-$rfn", $rfn), "relative symlink");
 is($s->readlink("sl2-$rfn"), $rfn, "read relative symlink");
-    
+
+my $a = $s->lstat("sl2-$rfn");
+ok($a, "lstat");
+is($a && $a->perm, 0120777, "symlink perms");
+is($a && $a->size, 0, "symlink size");
 
 
 
