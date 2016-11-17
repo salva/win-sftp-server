@@ -2068,42 +2068,27 @@ process_do_stat(uint32_t id, int follow) {
                 return send_ok(id, 0);
 
 	BY_HANDLE_FILE_INFORMATION file_info;
-	while (1) {
-		HANDLE h = CreateFileW(name,
-				       FILE_READ_ATTRIBUTES,
-				       FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-				       NULL, OPEN_EXISTING,
-				       FILE_FLAG_BACKUP_SEMANTICS, //|FILE_FLAG_OPEN_REPARSE_POINT,
-				       NULL);
-		if (h == INVALID_HANDLE_VALUE) {
-                        send_ok(id, 0);
-                        goto cleanup;
-                }
-		if (!GetFileInformationByHandle(h, &file_info)) {
-                        send_ok(id, 0);
-                        CloseHandle(h);
-                        goto cleanup;
-                }
-		if (follow && file_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-			wchar_t *link = ReadSymbolicLink(h);
-                        if (!link) {
-                                send_ok(id, 0);
-                                CloseHandle(h);
-                                goto cleanup;
-                        }
-			xfree(name);
-			name = link;
-			continue;
-		}
-		CloseHandle(h);
-		break;
-	}
+        HANDLE h = CreateFileW(name,
+                               FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING,
+                               FILE_FLAG_BACKUP_SEMANTICS | (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT),
+                               NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+                send_ok(id, 0);
+                goto cleanup;
+        }
+        if (!GetFileInformationByHandle(h, &file_info)) {
+                send_ok(id, 0);
+                goto cleanup;
+        }
 
 	Attrib a;
 	file_info_to_attrib(&file_info, &a, name);
 	send_attrib(id, &a);
 
 cleanup:
+        CloseHandle(h);
 	xfree(name);
 }
 
