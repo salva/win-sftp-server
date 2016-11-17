@@ -283,32 +283,6 @@ strlcat(char *dst, const char *src, size_t siz)
 //#define S_IWOTH 2
 //#define S_IXOTH 1
 
-void
-file_info_to_str(BY_HANDLE_FILE_INFORMATION *info, wchar_t *p)
-{
-
-        DWORD attrib = info->dwFileAttributes;
-	int is_dir = 0;
-
-	if (attrib & FILE_ATTRIBUTE_DIRECTORY) {
-		*p++ = 'd';
-		is_dir = 1;
-	}
-	else if (attrib & FILE_ATTRIBUTE_NORMAL)
-		*p++ = '-';
-	else
-		*p++ = '?';
-
-	if (is_dir)
-		*p++ = 'x';
-	else
-		*p++ = '-';
-
-	*p++ = 'r';
-	*p++ = 'w';
-        wmemcpy(p, L"------ ", 8);
-}
-
 /* static int */
 /* vasprintf(char **str, const char *fmt, va_list ap) */
 /* { */
@@ -1231,6 +1205,9 @@ win_error_to_portable(int win_error) {
 	case ERROR_SUCCESS:
 		return SSH2_FX_OK;
 
+        case ERROR_NO_MORE_FILES:
+                return SSH2_FX_EOF;
+
 	case ERROR_FILE_NOT_FOUND:
 	case ERROR_PATH_NOT_FOUND:
 	case ERROR_INVALID_DRIVE:
@@ -1324,15 +1301,26 @@ attrib_clear(Attrib *a) {
 	a->mtime = 0;
 }
 
+#define FMT  0170000
+#define REG  0100000
+#define DIR  0040000
+#define LNK  0120000
+#define BLK  0060000
+#define CHR  0020000
+#define FIFO 0010000
+#define SOCK 0140000
+
 static int
 win_attrib_to_posix_mode(DWORD attrib, const wchar_t *path) {
         int mode;
-        if (attrib & FILE_ATTRIBUTE_DIRECTORY)
-                mode =  040700;
+        if (attrib & FILE_ATTRIBUTE_REPARSE_POINT)
+                mode = LNK | 0777;
+        else if (attrib & FILE_ATTRIBUTE_DIRECTORY)
+                mode = DIR | 0700;
         else if (attrib & FILE_ATTRIBUTE_DEVICE)
-		mode = 060000;
+		mode = BLK | 0000;
 	else {
-                mode = 0100600;
+                mode = REG | 0600;
 
 		size_t len1 = GetShortPathNameW(path, NULL, 0);
 		if (len1) {
@@ -1360,9 +1348,70 @@ win_attrib_to_posix_mode(DWORD attrib, const wchar_t *path) {
         return mode;
 }
 
+static void
+posix_mode_to_wcs(int mode, wchar_t *p) {
+        int fmt = mode & FMT;
+        wchar_t type;
+        switch (fmt) {
+        case REG:
+                type = '-';
+                break;
+        case DIR:
+                type = 'd';
+                break;
+        case LNK:
+                type = 'l';
+                break;
+        case BLK:
+                type = 'b';
+                break;
+        case CHR:
+                type = 'c';
+                break;
+        case SOCK:
+                type = 's';
+                break;
+        default:
+                type = '?';
+                break;
+        }
+        *p++ = type;
+
+        int i = 3;
+        while (i--) {
+                int perm = (mode >> (i * 3)) & 07;
+                *p++ = ((perm & 4) ? 'r' : '-');
+                *p++ = ((perm & 2) ? 'w' : '-');
+                *p++ = ((perm & 1) ? 'x' : '-');
+        }
+        *p++ = ' ';
+        *p = '\0';
+}
+
 static int64_t
 file_info_to_size(BY_HANDLE_FILE_INFORMATION *info) {
 	return ((((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow);
+}
+
+static wchar_t *
+filetime_to_wcs(FILETIME *ft) {
+    SYSTEMTIME st_utc, st_local, st_now_utc, st_now_local;
+
+    FileTimeToSystemTime(ft, &st_utc);
+    SystemTimeToTzSpecificLocalTime(NULL, &st_utc, &st_local);
+
+    GetSystemTime(&st_now_utc);
+    SystemTimeToTzSpecificLocalTime(NULL, &st_now_utc, &st_now_local);
+
+    static const wchar_t *month_names[] = { L"Jan", L"Feb", L"Mar", L"Apr",
+                                            L"May", L"Jun", L"Jul", L"Aug",
+                                            L"Sep", L"Oct", L"Nov", L"Dec" };
+    const wchar_t *month_name = month_names[st_local.wMonth - 1];
+    if (st_local.wYear == st_now_local.wYear)
+        return xprintf(L"%ls %2d %02d:%02d", month_name, st_local.wDay, st_local.wHour, st_local.wMinute);
+
+    return xprintf(L"%ls %2d  %04d", month_name, st_local.wDay, st_local.wYear);
+
 }
 
 static void
@@ -2251,23 +2300,28 @@ process_readdir(uint32_t id)
         }
 
         // TODO: send more than one entry per packet
-        wchar_t *fullname = xwcscat(path, stats.name);
 
-        wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL;
+        int nlinks;
+        wchar_t *fullname = xwcscat(path, stats.name);
+        wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL, *date = NULL;
         wchar_t mode[11 + 1];
         StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
 
         HANDLE fd = CreateFileW(fullname,
                                 FILE_READ_ATTRIBUTES|READ_CONTROL,
                                 FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+                                NULL, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+                                NULL);
         if (fd == INVALID_HANDLE_VALUE)
                 tell_error("CreateFile failed");
         else {
                 BY_HANDLE_FILE_INFORMATION file_info;
                 if (GetFileInformationByHandle(fd, &file_info)) {
+                        nlinks = file_info.nNumberOfLinks;
                         file_info_to_attrib(&file_info, &stats.attrib, fullname);
-                        file_info_to_str(&file_info, mode);
+                        posix_mode_to_wcs(stats.attrib.perm, mode);
+                        date = filetime_to_wcs(&file_info.ftLastWriteTime);
                 }
                 else tell_error("GetFileInformationByHandle failed");
                 
@@ -2319,13 +2373,13 @@ process_readdir(uint32_t id)
                 CloseHandle(fd);
         }
         stats.long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
-                                  mode, 1,
+                                  mode, nlinks,
                                   (user ? user : L"?"),
                                   (user_domain ? user_domain : L"?"),
                                   (group ? group : L"?"),
                                   (group_domain ? group_domain : L"?"),
                                   stats.attrib.size,
-                                  L"yesterday",
+                                  date,
                                   stats.name);
 
         send_names(id, 1, &stats);
@@ -2337,6 +2391,7 @@ process_readdir(uint32_t id)
         if (group) xfree(group);
         if (user_domain) xfree(user_domain);
         if (group_domain) xfree(group_domain);
+        if (date) xfree(date);
 }
 
 static void

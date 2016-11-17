@@ -31,7 +31,7 @@ my $local_temp = path_to_wine $temp;
 my $remote_dir = "w";
 my $local_dir = "$local_temp/$remote_dir";
 
-my $exe = File::Spec->rel2abs("a.exe");
+my $exe = File::Spec->rel2abs("sftp-server.exe");
 my @cmd = $exe;
 unshift @cmd, 'wine' if $wine;
 
