@@ -157,7 +157,39 @@ is($a5 && $a5->size, 0, "symlink size");
 
 my $a6 = $s->stat("sl2-$rfn");
 ok($a6, "stat");
-isnt($a6 && $a6->perm, 0120777, "resolved symlink perms");
+my $perm6 = ($a6 && $a6->perm) // 0;
+isnt($perm6, 0120777, "resolved symlink perms");
+is($perm6 & 0170000, 0100000, "resolved symlink is a regular file");
+is($perm6 & 0700, 0600, "resolved symlink has read and write permissions");
 is($a6 && $a6->size, length($data), "resolved symlink size");
+
+my $fh7 = $s->open("sl2-$rfn", SSH2_FXF_READ);
+ok($fh7, "open following link");
+
+my $a7 = $s->stat($fh7); # this is a fstat under the hood
+ok($a7);
+my $perm7 = ($a7 && $a7->perm) // 0;
+is ($perm7 & 0170000, 0100000, "fstat regular file");
+is ($perm7 & 0700, 0600, "fstat retursn read and write permissions");
+
+my $old_time = time() - 100;
+
+ok($s->utime($fh7, $old_time, $old_time), "utime with fsetstat");
+$a7 = $s->stat($fh7);
+ok($a7, "fstat again");
+my $mtime7 = ($a7 && $a7->mtime) // 0;
+is($mtime7, $old_time, "fstat mtime");
+
+$old_time += 10;
+ok($s->utime($rfh, $old_time, $old_time), "utime with setstat");
+my $a8 = $s->stat($rfh);
+ok($a8, "stat 8");
+my $mtime8 = ($a8 && $a8->mtime) // 0;
+is ($mtime8, $old_time);
+
+my $a9 = $s->stat("sl1-$rfn");
+ok($a9, "stat 9");
+my $mtime9 = ($a9 && $a9->mtime) // 0;
+is($mtime9, $old_time, "mtime following symlink");
 
 done_testing();
