@@ -150,11 +150,14 @@ ok(!$s->test_e("sl2-$rfn"), "symbolic link does not exist");
 ok($s->symlink("sl2-$rfn", $rfn), "relative symlink");
 is($s->readlink("sl2-$rfn"), $rfn, "read relative symlink");
 
-my $a = $s->lstat("sl2-$rfn");
-ok($a, "lstat");
-is($a && $a->perm, 0120777, "symlink perms");
-is($a && $a->size, 0, "symlink size");
+my $a5 = $s->lstat("sl2-$rfn");
+ok($a5, "lstat");
+is($a5 && $a5->perm, 0120777, "symlink perms");
+is($a5 && $a5->size, 0, "symlink size");
 
-
+my $a6 = $s->stat("sl2-$rfn");
+ok($a6, "stat");
+isnt($a6 && $a6->perm, 0120777, "resolved symlink perms");
+is($a6 && $a6->size, length($data), "resolved symlink size");
 
 done_testing();
