@@ -1861,6 +1861,9 @@ process_open(uint32_t id)
 		fd = CreateFileW(name, access,
 				 FILE_SHARE_DELETE|FILE_SHARE_READ|FILE_SHARE_WRITE,
 				 NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
+
+                debug3("opening file %ls with access %d, error: %d", name, access, GetLastError());
+
 		if (fd == INVALID_HANDLE_VALUE) {
 			status = last_error_to_portable();
 		} else {
@@ -2119,121 +2122,113 @@ process_fstat(uint32_t id)
         send_ok(id, 0);
 }
 
+static int
+fsetstat(HANDLE fd, Attrib *a) {
+        DWORD error = ERROR_SUCCESS;
+        debug3("fsetstat called, a->flags: %x", a->flags);
+
+        if (a->flags & SSH2_FILEXFER_ATTR_SIZE) {
+		LARGE_INTEGER off;
+		off.QuadPart = a->size;
+
+                debug3("truncate!");
+
+                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) ||
+                    !SetEndOfFile(fd))
+                        error = error || GetLastError();
+        }
+
+        if (a->flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
+                debug3("setting file times, old error: %d", error);
+                FILETIME wmtime = posix_time_to_win(a->mtime);
+                FILETIME watime = posix_time_to_win(a->atime);
+                if (!SetFileTime(fd, NULL, &watime, &wmtime))
+                        error = error || GetLastError();
+                debug3("file times set, new error: %d", error);
+        }
+
+        if (a->flags & (SSH2_FILEXFER_ATTR_UIDGID | SSH2_FILEXFER_ATTR_PERMISSIONS))
+                error = error || ERROR_NOT_SUPPORTED;
+
+        SetLastError(error);
+        return (error == ERROR_SUCCESS);
+
+}
+
+/*         } */
+/*         if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) { */
+/*                 logit("set \"%s\" mode %04o", name, .perm); */
+/* #ifdef HAVE_FCHMOD */
+/*                 if (!fchmod(fd, a.perm & 07777)) */
+/*                         status = last_error_to_portable(); */
+/* #else */
+/*                 // TODO: reimplement chmod! */
+/*                 /\* if (! chmod(name, a.perm & 07777)... *\/ */
+/* #endif */
+/*         } */
+/*         if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) { */
+/*                 char buf[64]; */
+/*                 time_t t = a.mtime; */
+
+/*                 strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S", */
+/*                          localtime(&t)); */
+/*                 logit("set \"%s\" modtime %s", name, buf); */
+
+/*                 // TODO: implement and use futimes */
+/*                 // r = futimes(fd, attrib_to_tv(&a)); */
+/*                 if (!w_utimes(name, a.mtime, a.atime)) */
+/*                         status = last_error_to_portable(); */
+/*         } */
+/*         if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) { */
+/*                 logit("set \"%s\" owner %lu group %lu", name, */
+/*                       (u_long)a.uid, (u_long)a.gid); */
+/*                 // TODO: reimplement fchown */
+/*                 // r = fchown(fd, a.uid, a.gid); */
+/*                 // r = w_chown(name, a.uid, a.gid); */
+/*                 //if (r == -1) */
+/*                 //	status = last_error_to_portable(); */
+/*         } */
+
+/* 	send_status(id, status); */
+/* } */
+
 static void
 process_setstat(uint32_t id)
 {
-	wchar_t *name;
-	if (!sshbuf_get_path(iqueue, &name, 0))
-                return send_ok(id, 0);
+        int ok = 0;
+	wchar_t *name = NULL;
+        HANDLE fd = INVALID_HANDLE_VALUE;
+	if (sshbuf_get_path(iqueue, &name, 0)) {
+                Attrib a;
+                if (decode_attrib(iqueue, &a)) {
+                        DWORD access = FILE_WRITE_ATTRIBUTES;
+                        if (a.flags & SSH2_FILEXFER_ATTR_SIZE)
+                                access |= FILE_WRITE_DATA;
 
-        int status = SSH2_FX_OK;
-        Attrib a;
-        if (!decode_attrib(iqueue, &a))
-                status = last_error_to_portable();
-        else {
-                if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
-                        logit("set \"%ls\" size %llu",
-                              name, (unsigned long long)a.size);
-
-                        HANDLE fd = CreateFileW(name, GENERIC_WRITE,
-						FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        HANDLE fd = CreateFileW(name, access,
+                                                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
                                                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-                        if (fd == INVALID_HANDLE_VALUE)
-                                status = last_error_to_portable();
-                        else {
-                                LARGE_INTEGER off;
-                                off.QuadPart = a.size;
-                                if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) || 
-                                    !SetEndOfFile(fd))
-                                        status = last_error_to_portable();
-                        }
-                }
-                if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-                        logit("set \"%ls\" mode %04o", name, a.perm);
-                        status = SSH2_FX_OP_UNSUPPORTED;
-                        // FIXME: reimplement chmod
-                        // chmod(name, a.perm & 07777);
-                }
-                if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
-                        char buf[64];
-                        time_t t = a.mtime;
 
-                        strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
-                                 localtime(&t));
-                        logit("set \"%ls\" modtime %s", name, buf);
-                        if (!w_utimes(name, a.mtime, a.atime))
-                                status = last_error_to_portable();
-                }
-                if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
-                        logit("set \"%s\" owner %lu group %lu", name,
-                              (u_long)a.uid, (u_long)a.gid);
-                        status = SSH2_FX_OP_UNSUPPORTED;
-                        // FIXME: reimplement chown
-                        //r = w_chown(name, a.uid, a.gid);
+                        if (fd != INVALID_HANDLE_VALUE)
+                                ok = fsetstat(fd, &a);
                 }
         }
-        send_status(id, status);
-	xfree(name);
+        send_ok(id, ok);
+        if (fd != INVALID_HANDLE_VALUE)
+                CloseHandle(fd);
+        if (name) xfree(name);
 }
 
 static void
 process_fsetstat(uint32_t id)
 {
+        int ok = 0;
 	Attrib a;
 	int handle;
-	if (!get_handle(iqueue, HANDLE_DIR|HANDLE_FILE, &handle) ||
-            !decode_attrib(iqueue, &a))
-                return send_ok(id, 0);
-
-        debug("request %u: fsetstat handle %d", id, handle);
-
-        HANDLE fd = handle_to_win_handle(handle);
-        wchar_t *name = handle_to_name(handle);
-
-        int status = SSH2_FX_OK;
-        if (a.flags & SSH2_FILEXFER_ATTR_SIZE) {
-                logit("set \"%s\" size %llu",
-                      name, (unsigned long long)a.size);
-		LARGE_INTEGER off;
-		off.QuadPart = a.size;
-		if (!SetFilePointerEx(fd, off, NULL, FILE_BEGIN) ||
-		    !SetEndOfFile(fd))
-                        status = last_error_to_portable();
-        }
-        if (a.flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
-                logit("set \"%s\" mode %04o", name, a.perm);
-#ifdef HAVE_FCHMOD
-                if (!fchmod(fd, a.perm & 07777))
-                        status = last_error_to_portable();
-#else
-                // TODO: reimplement chmod!
-                /* if (! chmod(name, a.perm & 07777)... */
-#endif
-        }
-        if (a.flags & SSH2_FILEXFER_ATTR_ACMODTIME) {
-                char buf[64];
-                time_t t = a.mtime;
-
-                strftime(buf, sizeof(buf), "%Y%m%d-%H:%M:%S",
-                         localtime(&t));
-                logit("set \"%s\" modtime %s", name, buf);
-
-                // TODO: implement and use futimes
-                // r = futimes(fd, attrib_to_tv(&a));
-                if (!w_utimes(name, a.mtime, a.atime))
-                        status = last_error_to_portable();
-        }
-        if (a.flags & SSH2_FILEXFER_ATTR_UIDGID) {
-                logit("set \"%s\" owner %lu group %lu", name,
-                      (u_long)a.uid, (u_long)a.gid);
-                // TODO: reimplement fchown
-                // r = fchown(fd, a.uid, a.gid);
-                // r = w_chown(name, a.uid, a.gid);
-                //if (r == -1)
-                //	status = last_error_to_portable();
-        }
-
-	send_status(id, status);
+	if (get_handle(iqueue, HANDLE_DIR|HANDLE_FILE, &handle) &&
+            decode_attrib(iqueue, &a))
+                ok = fsetstat(handle_to_win_handle(handle), &a);
+        send_ok(id, ok);
 }
 
 static void

@@ -170,11 +170,13 @@ my $a7 = $s->stat($fh7); # this is a fstat under the hood
 ok($a7);
 my $perm7 = ($a7 && $a7->perm) // 0;
 is ($perm7 & 0170000, 0100000, "fstat regular file");
-is ($perm7 & 0700, 0600, "fstat retursn read and write permissions");
+is ($perm7 & 0700, 0600, "fstat returns read and write permissions");
 
 my $old_time = time() - 100;
 
-ok($s->utime($fh7, $old_time, $old_time), "utime with fsetstat");
+is($s->utime($fh7, $old_time, $old_time), undef, "utime with fsetstat and not enough permissions fails");
+$old_time += 10;
+ok($s->utime($rfh1, $old_time, $old_time), "utime with fsetstat and write permissions succeeds");
 $a7 = $s->stat($fh7);
 ok($a7, "fstat again");
 my $mtime7 = ($a7 && $a7->mtime) // 0;
@@ -191,5 +193,15 @@ my $a9 = $s->stat("sl1-$rfn");
 ok($a9, "stat 9");
 my $mtime9 = ($a9 && $a9->mtime) // 0;
 is($mtime9, $old_time, "mtime following symlink");
+
+my $MAX_PATH = 260;
+my $long_file_name = "file_with_very_long_name_".('X' x $MAX_PATH).".txt";
+ok(length($long_file_name) > $MAX_PATH, "file name is quite long");
+my $fh10 = $s->open($long_file_name, SSH2_FXF_WRITE | SSH2_FXF_CREAT);
+
+TODO: {
+    local $TODO = "support for long file names is still missing";
+    ok($fh10, "open file with very long file name");
+};
 
 done_testing();
