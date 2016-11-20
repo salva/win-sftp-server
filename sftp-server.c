@@ -922,16 +922,16 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
         append_bar = (append_bar ? 1 : 0);
 
         *valp = NULL;
-        
+
         size_t len;
         const uint8_t *p;
 	if (!sshbuf_peek_string_direct(buf, &p, &len) ||
             !sshbuf_skip_string(buf))
                 return 0;
-        
+
         static const uint8_t forbidden_path_chr[] = "<>:\"|?*";
         static const uint8_t current_dir[] = ".";
-                
+
         if (len == 0) {
                 debug("zero length path given, taken as '.'");
                 p = current_dir;
