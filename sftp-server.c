@@ -944,12 +944,25 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                         return 0;
                 }
 
-                // convert '\\' to '/'
-                int i;
-                for (i = 0; i < len; i++) {
-                        // just override the const qualifier
-                        if (p[i] == '\\') ((uint8_t *)p)[i] = '/';
+                debug("path before cleanup: >>%s<<", p);
+
+                /* convert '/' to '\\' and colapse multiple bars into one. */
+                int i, bars;
+                uint8_t *wp = (uint8_t *)p;
+
+                for (bars = i = 0; i < len; i++) {
+                        uint8_t c = p[i];
+                        if (c == '/' || c == '\\') {
+                                if (bars++) continue;
+                                c = '/';
+                        }
+                        else
+                                bars = 0;
+                        *wp++ = c;
                 }
+                len = wp - p;
+
+                debug("path after cleanup: >>%s<<", p);
 
                 int skip_vol = 0;
                 if (len >= 2 && isalpha(p[0]) && p[1] == ':') {
