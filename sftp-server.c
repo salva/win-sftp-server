@@ -2666,14 +2666,14 @@ cleanup_exit(int i)
 static void
 sftp_server_usage(void)
 {
-	char progname[200];
+	wchar_t progname[200];
 	GetModuleFileName(0, progname, sizeof(progname));
 
 	fprintf(stderr,
-		"usage: %s [-ehR] [-d start_directory] [-f log_facility] "
+		"usage: %ls [-ehR] [-d start_directory] [-f log_facility] "
 		"[-l log_level]\n\t[-P blacklisted_requests] "
 		"[-p whitelisted_requests] [-u umask]\n"
-		"       %s -Q protocol_feature\n",
+		"       %ls -Q protocol_feature\n",
 		progname, progname);
 	exit(1);
 }
@@ -2813,50 +2813,50 @@ percent_expand(const char *string, ...)
 #undef EXPAND_MAX_KEYS
 }
 
+static int
+ParseOptW(int *argc, wchar_t ***argv, wchar_t **oa, wchar_t *have_args) {
+	*oa = NULL;
+	if (*argc) {
+		wchar_t *arg = (*argv)[0];
+		if (arg[0] == '-' || arg[0] == '/') {
+			int ch = arg[1];
+
+			if (ch != 0) {
+				if (wcschr(have_args, ch)) {
+					if (arg[2] == '\0' && *argc > 1) {
+						(*argc)--;
+						(*argv)++;
+						*oa = **argv;
+					}
+					else if (arg[2] == ':') {
+						*oa = arg + 3;
+					}
+					else {
+						return -1;
+					}
+				}
+				else {
+					if (arg[2])
+						return -1;
+				}
+			} /* else we are done */
+
+			(*argc)--;
+			(*argv)++;
+			return ch;
+		}
+	}
+	return 0;
+}
+
 int
-main(int argc, char **argv)
-{
-	int i, ch, skipargs = 0;
+wmain(int argc, wchar_t **argv) {
 	char *cp, *homedir = NULL, buf[4*4096];
-
-	HANDLE in, out;
-
-	extern char *optarg;
-
-	while (!skipargs && (ch = getopt(argc, argv,
-	    "d:f:l:P:p:Q:u:cehR")) != -1) {
+	wchar_t *optarg;
+	int ch;
+	argc++; argv++; /* skip program name */
+	while ((ch = ParseOptW(&argc, &argv, &optarg, L"d"))) { /* old pattern: "d:f:l:P:p:Q:u:cehR" */
 		switch (ch) {
-		case 'Q':
-			if (strcasecmp(optarg, "requests") != 0) {
-				fprintf(stderr, "Invalid query type\n");
-				exit(1);
-			}
-			for (i = 0; handlers[i].handler != NULL; i++)
-				printf("%s\n", handlers[i].name);
-			for (i = 0; extended_handlers[i].handler != NULL; i++)
-				printf("%s\n", extended_handlers[i].name);
-			exit(0);
-			break;
-		case 'R':
-			readonly = 1;
-			break;
-		case 'c':
-			/*
-			 * Ignore all arguments if we are invoked as a
-			 * shell using "sftp-server -c command"
-			 */
-			skipargs = 1;
-			break;
-		case 'e':
-			// log_stderr = 1;
-			break;
-		case 'l':
-			log_level = log_level_number(optarg);
-			if (log_level == LOG_LEVEL_NOT_SET)
-				error("Invalid log level \"%s\"", optarg);
-			break;
-		case 'f':
-			break;
 		case 'd':
 			/* cp = tilde_expand_filename(optarg), user_pw->pw_uid); */
 			/* homedir = percent_expand(cp, "d", user_pw->pw_dir, */
@@ -2864,27 +2864,22 @@ main(int argc, char **argv)
 			/* xfree(cp); */
 
 			// TODO: Fixme!
-			homedir = tilde_expand_filename(optarg);
+			/* homedir = tilde_expand_filename(optarg); */
 			// homedir = percent_expand ...
+			debug("chroot path: %ls", optarg);
+			exit(5);
 			break;
-		case 'p':
-			if (request_whitelist != NULL)
-				fatal("Permitted requests already set");
-			request_whitelist = xstrdup(optarg);
-			break;
-		case 'P':
-			if (request_blacklist != NULL)
-				fatal("Refused requests already set");
-			request_blacklist = xstrdup(optarg);
-			break;
+		case -1:
+			debug("bad arguments");
 		case 'h':
 		default:
 			sftp_server_usage();
+			break;
 		}
 	}
 
         debug("arguments parsed");
-        
+
 	/*
 	 * On platforms where we can, avoid making /proc/self/{mem,maps}
 	 * available to the user so that sftp access doesn't automatically
@@ -2904,12 +2899,12 @@ main(int argc, char **argv)
 		client_addr = xstrdup("UNKNOWN");
 
         debug("client addr is %s", client_addr);
-        
+
 	logit("session opened for local user %s from [%s]",
               NULL, client_addr);
 
-	in = GetStdHandle(STD_INPUT_HANDLE);
-	out = GetStdHandle(STD_OUTPUT_HANDLE);
+	HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
 
 	if ((iqueue = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
