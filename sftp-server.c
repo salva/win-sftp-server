@@ -2317,7 +2317,7 @@ process_readdir(uint32_t id)
                         date = filetime_to_wcs(&file_info.ftLastWriteTime);
                 }
                 else tell_error("GetFileInformationByHandle failed");
-                
+
                 SECURITY_DESCRIPTOR *sd = NULL;
                 SID *sid_owner = NULL, *sid_group = NULL;
                 if (GetSecurityInfo(fd, SE_FILE_OBJECT,
@@ -2376,7 +2376,7 @@ process_readdir(uint32_t id)
                                   stats.name);
 
         send_names(id, 1, &stats);
-        
+
         xfree(fullname);
         xfree(stats.name);
         xfree(stats.long_name);
@@ -2464,7 +2464,7 @@ process_realpath(uint32_t id) {
                 xfree(fullpath);
         }
         else tell_error("GetFullPathNameW failed (1)");
-        
+
         if (!ok) send_ok(id, 0);
 	xfree(path);
 }
