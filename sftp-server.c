@@ -954,7 +954,7 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                         uint8_t c = p[i];
                         if (c == '/' || c == '\\') {
                                 if (bars++) continue;
-                                c = '/';
+                                c = '\\';
                         }
                         else
                                 bars = 0;
@@ -966,8 +966,8 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
 
                 int skip_vol = 0;
                 if (len >= 2 && isalpha(p[0]) && p[1] == ':') {
-                        if (len == 2 || p[2] != '/') {
-                                // TODO: use GetFullPathName() to resolve the path
+                        if (len == 2 || p[2] != '\\') {
+				/* TODO: use GetFullPathName() to resolve the path */
                                 debug3("sshbuf_get_path (%*s) failed, relative paths after a volume name are fobidden",
                                        len, p);
                                 SetLastError(ERROR_BAD_PATHNAME);
@@ -984,13 +984,13 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                         }
                 }
 
-                // remove trailing '/' characters
-                // except when it is the first character
+                /* remove trailing '/' characters except when it is
+		   the first character */
                 for (i = len; --i > skip_vol;) {
-                        if (p[i] != '/') break;
+                        if (p[i] != '\\') break;
                         len--;
                 }
-                if (p[i] == '/') append_bar = 0;
+                if (p[i] == '\\') append_bar = 0;
         }
 
         int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -1004,7 +1004,7 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
         if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                                 (const char *)p, len, *valp, wlen) == wlen) {
                 if (append_bar) {
-                        (*valp)[wlen] = '/';
+                        (*valp)[wlen] = '\\';
                         (*valp)[wlen + 1] = 0;
                 }
                 else
@@ -2283,7 +2283,7 @@ process_readdir(uint32_t id)
         HANDLE dd = handle_to_win_handle(hix);
         Stat stats;
         attrib_clear(&stats.attrib);
-        
+
         stats.name = handle_to_cached_dir_start_and_reset(hix);
         if (!stats.name) {
                 WIN32_FIND_DATAW find_data;
