@@ -139,6 +139,9 @@ ok $s->seek($rfh2, 0, 0), "seek to beginning";
 my $data3 = do { undef $/; <$rfh2> };
 is ($data3, $data, "reread from the beginning");
 
+SKIP: {
+    skip "symlinks are not supported by Wine" if $wine;
+
 $s->remove("sl1-$rfn");
 ok(!$s->test_e("sl1-$rfn"), "symbolic link does not exist");
 ok($s->symlink("sl1-$rfn", $s->realpath($rfn)), "abs symlink");
@@ -202,6 +205,8 @@ my $fh10 = $s->open($long_file_name, SSH2_FXF_WRITE | SSH2_FXF_CREAT);
 TODO: {
     local $TODO = "support for long file names is still missing";
     ok($fh10, "open file with very long file name");
+};
+
 };
 
 done_testing();
