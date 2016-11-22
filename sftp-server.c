@@ -2423,21 +2423,6 @@ cleanup_exit(int i)
 	_Exit(i);
 }
 
-static void
-sftp_server_usage(void)
-{
-	wchar_t progname[200];
-	GetModuleFileName(0, progname, sizeof(progname));
-
-	fprintf(stderr,
-		"usage: %ls [-ehR] [-d start_directory] [-f log_facility] "
-		"[-l log_level]\n\t[-P blacklisted_requests] "
-		"[-p whitelisted_requests] [-u umask]\n"
-		"       %ls -Q protocol_feature\n",
-		progname, progname);
-	exit(1);
-}
-
 static char *
 percent_expand(const char *string, ...)
 {
@@ -2532,10 +2517,16 @@ ParseOptW(int *argc, wchar_t ***argv, wchar_t **oa, wchar_t *have_args) {
 	return 0;
 }
 
+static void
+sftp_server_usage(wchar_t *binary) {
+	fprintf(stderr, "Usage:\n  %ls [/v] [/d start_directory]\n", binary);
+}
+
 int
 wmain(int argc, wchar_t **argv) {
 	char *homedir = NULL, buf[4*4096];
 	wchar_t *optarg;
+	wchar_t *binary = argv[0];
 	int ch;
 	argc--; argv++; /* skip program name */
 	while ((ch = ParseOptW(&argc, &argv, &optarg, L"d"))) { /* old pattern: "d:f:l:P:p:Q:u:cehR" */
@@ -2552,9 +2543,11 @@ wmain(int argc, wchar_t **argv) {
 			break;
 		case -1:
 			debug("bad arguments");
+		case '?':
 		case 'h':
 		default:
-			sftp_server_usage();
+			sftp_server_usage(binary);
+			exit(1);
 			break;
 		}
 	}
