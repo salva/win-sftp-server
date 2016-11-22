@@ -139,6 +139,8 @@ static int init_done;
 /* Disable writes */
 static int readonly = 0;
 
+static wchar_t *rootdir;
+
 /* Portable attributes, etc. */
 struct Stat {
 	wchar_t *name;
@@ -281,8 +283,10 @@ xmalloc(size_t size)
 
 static void
 xfree(void *ptr) {
+	DWORD last_error = GetLastError();
         if (ptr && !HeapFree(GetProcessHeap(), 0, ptr))
                 fatal_error("HeapFree failed");
+	SetLastError(last_error);
 }
 
 static void *
@@ -1234,6 +1238,30 @@ file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a, const wchar_t *
         a->mtime = win_time_to_posix(info->ftLastWriteTime);
 }
 
+static wchar_t*
+realpath(wchar_t *path) {
+	DWORD len = GetFullPathNameW(path, 0, NULL, NULL);
+        if (len) {
+                wchar_t *fullpath = xwcsalloc(len);
+		DWORD len1 = GetFullPathNameW(path, len, fullpath, NULL);
+		if (len1 > 0 && len1 < len) {
+			size_t len = GetLongPathNameW(fullpath, NULL, 0);
+			if (len) {
+				wchar_t *longpath = xwcsalloc(len);
+                                size_t len1 = GetLongPathNameW(fullpath, longpath, len);
+                                if (len1 && len1 < len) {
+					xfree(fullpath);
+					return longpath;
+				}
+				xfree(longpath);
+			}
+		}
+		xfree(fullpath);
+	}
+	tell_error("realpath failed");
+	return NULL;
+}
+
 static Handle *handles = NULL;
 static int num_handles = 0;
 static int first_unused_handle = -1;
@@ -2175,41 +2203,22 @@ process_realpath(uint32_t id) {
 	if (!sshbuf_get_path(iqueue, &path, 0))
                 return send_ok(id, 0);
 
-        int ok = 0;
-        DWORD len = GetFullPathNameW(path, 0, NULL, NULL);
-        if (len) {
-                wchar_t *fullpath = xwcsalloc(len);
-                DWORD len1 = GetFullPathNameW(path, len, fullpath, NULL);
-                if (len1 > 0 && len1 < len) {
-                        size_t len = GetLongPathNameW(fullpath, NULL, 0);
-                        if (len) {
-                                wchar_t *longpath = xwcsalloc(len);
-                                size_t len1 = GetLongPathNameW(fullpath, longpath, len);
-                                if (len1 && len1 < len) {
-                                        Stat s;
-                                        attrib_clear(&s.attrib);
-					size_t i;
-					for (i = 0; i < len; i++) {
-						if (longpath[i] == '\\')
-							longpath[i] = '/';
-					}
-                                        s.name = longpath;
-                                        s.long_name = xwcsdup(L"");
-                                        send_names(id, 1, &s);
-                                        ok = 1;
-                                }
-                                else tell_error("GetLongPathNameW failed (2)");
-                                xfree(longpath);
-                        }
-                        else tell_error("GetLongPathNameW failed (1)");
-                }
-                else tell_error("GetFullPathNameW failed (2)");
-                xfree(fullpath);
-        }
-        else tell_error("GetFullPathNameW failed (1)");
-
-        if (!ok) send_ok(id, 0);
-	xfree(path);
+	wchar_t *longpath = realpath(path);
+	if (longpath) {
+		Stat s;
+		attrib_clear(&s.attrib);
+		size_t i;
+		for (i = 0; longpath[i]; i++) {
+			if (longpath[i] == '\\')
+				longpath[i] = '/';
+		}
+		s.name = longpath;
+		s.long_name = xwcsdup(L"");
+		send_names(id, 1, &s);
+		xfree(longpath);
+	}
+	else
+		send_ok(id, 0);
 }
 
 static void
@@ -2522,16 +2531,11 @@ wmain(int argc, wchar_t **argv) {
 	while ((ch = ParseOptW(&argc, &argv, &optarg, L"d"))) { /* old pattern: "d:f:l:P:p:Q:u:cehR" */
 		switch (ch) {
 		case 'd':
-			/* cp = tilde_expand_filename(optarg), user_pw->pw_uid); */
-			/* homedir = percent_expand(cp, "d", user_pw->pw_dir, */
-			/*     "u", user_pw->pw_name, (char *)NULL); */
-			/* xfree(cp); */
-
-			// TODO: Fixme!
-			/* homedir = tilde_expand_filename(optarg); */
-			// homedir = percent_expand ...
-			debug("chroot path: %ls", optarg);
-			exit(5);
+			rootdir = realpath(optarg);
+			if (rootdir)
+				debug("chroot to >>%ls<<", rootdir);
+			else
+				fatal_error("realpath failed");
 			break;
 		case 'v':
 			debug_mode = 1;
