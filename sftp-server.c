@@ -2419,48 +2419,7 @@ sftp_server_usage(void)
 	exit(1);
 }
 
-/* char * */
-/* tilde_expand_filename(const char *filename, uid_t uid) */
-/* { */
-/* 	const char *path, *sep; */
-/* 	char user[128], *ret; */
-/* 	struct passwd *pw; */
-/* 	uint len, slash; */
-
-/* 	if (*filename != '~') */
-/* 		return (xstrdup(filename)); */
-/* 	filename++; */
-
-/* 	path = strchr(filename, '/'); */
-/* 	if (path != NULL && path > filename) {		/\* ~user/path *\/ */
-/* 		slash = path - filename; */
-/* 		if (slash > sizeof(user) - 1) */
-/* 			fatal("tilde_expand_filename: ~username too long"); */
-/* 		memcpy(user, filename, slash); */
-/* 		user[slash] = '\0'; */
-/* 		if ((pw = getpwnam(user)) == NULL) */
-/* 			fatal("tilde_expand_filename: No such user %s", user); */
-/* 	} else if ((pw = getpwuid(uid)) == NULL)	/\* ~/path *\/ */
-/* 		fatal("tilde_expand_filename: No such uid %ld", (long)uid); */
-
-/* 	/\* Make sure directory has a trailing '/' *\/ */
-/* 	len = strlen(pw->pw_dir); */
-/* 	if (len == 0 || pw->pw_dir[len - 1] != '/') */
-/* 		sep = "/"; */
-/* 	else */
-/* 		sep = ""; */
-
-/* 	/\* Skip leading '/' from specified path *\/ */
-/* 	if (path != NULL) */
-/* 		filename = path + 1; */
-
-/* 	if (xasprintf(&ret, "%s%s%s", pw->pw_dir, sep, filename) >= PATH_MAX) */
-/* 		fatal("tilde_expand_filename: Path too long"); */
-
-/* 	return (ret); */
-/* } */
-
- char *
+static char *
 percent_expand(const char *string, ...)
 {
 #define EXPAND_MAX_KEYS	16
