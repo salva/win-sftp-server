@@ -32,7 +32,7 @@ my $remote_dir = "w";
 my $local_dir = "$local_temp/$remote_dir";
 
 my $exe = File::Spec->rel2abs("sftp-server.exe");
-my @cmd = $exe;
+my @cmd = ($exe, '-v');
 unshift @cmd, 'wine' if $wine;
 
 my $errfh;
