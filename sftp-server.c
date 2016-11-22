@@ -1239,27 +1239,42 @@ file_info_to_attrib(BY_HANDLE_FILE_INFORMATION *info, Attrib *a, const wchar_t *
 }
 
 static wchar_t*
-realpath(wchar_t *path) {
+fullpath(wchar_t *path) {
 	DWORD len = GetFullPathNameW(path, 0, NULL, NULL);
         if (len) {
                 wchar_t *fullpath = xwcsalloc(len);
 		DWORD len1 = GetFullPathNameW(path, len, fullpath, NULL);
-		if (len1 > 0 && len1 < len) {
-			size_t len = GetLongPathNameW(fullpath, NULL, 0);
-			if (len) {
-				wchar_t *longpath = xwcsalloc(len);
-                                size_t len1 = GetLongPathNameW(fullpath, longpath, len);
-                                if (len1 && len1 < len) {
-					xfree(fullpath);
-					return longpath;
-				}
-				xfree(longpath);
-			}
-		}
+		if (len1 > 0 && len1 < len)
+			return fullpath;
 		xfree(fullpath);
 	}
-	tell_error("realpath failed");
+	tell_error("GetFullPathName failed");
 	return NULL;
+}
+
+static wchar_t*
+realpath(wchar_t *path) {
+	wchar_t *fp = fullpath(path);
+	if (fp) {
+		size_t len = GetLongPathNameW(fp, NULL, 0);
+		if (len) {
+			wchar_t *longpath = xwcsalloc(len);
+			size_t len1 = GetLongPathNameW(fp, longpath, len);
+			if (len1 && len1 < len) {
+				xfree(fp);
+				return longpath;
+			}
+			xfree(longpath);
+		}
+		xfree(fp);
+		tell_error("GetLongPathNameW failed");
+	}
+	return NULL;
+}
+
+static int
+check_path(wchar_t *path) {
+	return 1;
 }
 
 static Handle *handles = NULL;
