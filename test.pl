@@ -209,4 +209,12 @@ TODO: {
 
 };
 
+ok($s->disconnect, "disconnect");
+
+my $s2 = Net::SFTP::Foreign->new(open2_cmd => [@cmd, '/d', $temp],
+                                 stderr_fh => $errfh);
+ok($s2, "launch second process");
+ok($s2->setcwd($remote_dir), "check /d");
+ok($s2->test_e($rfn), "check /d");
+
 done_testing();

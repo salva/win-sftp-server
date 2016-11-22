@@ -1272,11 +1272,6 @@ realpath(wchar_t *path) {
 	return NULL;
 }
 
-static int
-check_path(wchar_t *path) {
-	return 1;
-}
-
 static Handle *handles = NULL;
 static int num_handles = 0;
 static int first_unused_handle = -1;
@@ -2548,7 +2543,7 @@ wmain(int argc, wchar_t **argv) {
 		case 'd':
 			rootdir = realpath(optarg);
 			if (rootdir)
-				debug("chroot to >>%ls<<", rootdir);
+				debug("root dir set to >>%ls<<", rootdir);
 			else
 				fatal_error("realpath failed");
 			break;
@@ -2566,12 +2561,12 @@ wmain(int argc, wchar_t **argv) {
 
         debug("arguments parsed");
 
-	/*
-	 * On platforms where we can, avoid making /proc/self/{mem,maps}
-	 * available to the user so that sftp access doesn't automatically
-	 * imply arbitrary code execution access that will break
-	 * restricted configurations.
-	 */
+	if (rootdir) {
+		if (!SetCurrentDirectory(rootdir))
+			fatal_error("SetCurrentDirectory failed");
+		debug("Current directory set to %ls", rootdir);
+	}
+
 
 	HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
 	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
