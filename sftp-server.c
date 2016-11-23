@@ -929,7 +929,7 @@ static int
 sshbuf_put_wcs(struct sshbuf *buf, const wchar_t *v, size_t wlen)
 {
 	if (!wlen) return sshbuf_put_string(buf, "", 0);
-                
+
         size_t alen = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, v, wlen,
                                           NULL, 0, NULL, NULL);
         if (alen) {
@@ -990,34 +990,6 @@ sshbuf_reset(struct sshbuf *buf)
                 buf->alloc = SSHBUF_SIZE_INIT;
 	}
 }
-
-/* static int */
-/* request_permitted(struct sftp_handler *h) */
-/* { */
-/* 	char *result; */
-
-/* 	if (readonly && h->does_write) { */
-/* 		verbose("Refusing %s request in read-only mode", h->name); */
-/* 		return 0; */
-/* 	} */
-/* 	if (request_blacklist != NULL && */
-/* 	    ((result = match_list(h->name, request_blacklist, NULL))) != NULL) { */
-/* 		free(result); */
-/* 		verbose("Refusing blacklisted %s request", h->name); */
-/* 		return 0; */
-/* 	} */
-/* 	if (request_whitelist != NULL && */
-/* 	    ((result = match_list(h->name, request_whitelist, NULL))) != NULL) { */
-/* 		xfree(result); */
-/* 		debug2("Permitting whitelisted %s request", h->name); */
-/* 		return 1; */
-/* 	} */
-/* 	if (request_whitelist != NULL) { */
-/* 		verbose("Refusing non-whitelisted %s request", h->name); */
-/* 		return 0; */
-/* 	} */
-/* 	return 1; */
-/* } */
 
 static int
 win_error_to_portable(int win_error) {
@@ -1316,7 +1288,7 @@ handle_is_ok(int i, int type)
         }
         else
                 debug("handle %d does not exists", i);
-        
+
         SetLastError(ERROR_INVALID_HANDLE);
 
         return 0;
@@ -1419,7 +1391,7 @@ get_win_handle(struct sshbuf *queue, int type, HANDLE *hp) {
 static void
 send_msg(struct sshbuf *m) {
 	if (!sshbuf_put_stringb(oqueue, m))
-		fatal("%s: buffer error", __func__);                
+		fatal("%s: buffer error", __func__);
         sshbuf_reset(m);
 }
 
@@ -1444,7 +1416,7 @@ status_to_message(uint32_t status)
 static void
 send_status(uint32_t id, uint32_t status) {
 	debug("request %u: sent status %u", id, status);
-        
+
 	struct sshbuf *msg = sshbuf_new();
 	if (sshbuf_put_u8(msg, SSH2_FXP_STATUS) &&
 	    sshbuf_put_u32(msg, id) &&
@@ -1465,7 +1437,7 @@ static void
 send_data_or_handle(char type, uint32_t id, const uint8_t *data, int dlen) {
 	struct sshbuf *msg = sshbuf_new();
 	if (sshbuf_put_u8(msg, type) &&
-	    sshbuf_put_u32(msg, id) && 
+	    sshbuf_put_u32(msg, id) &&
             sshbuf_put_string(msg, data, dlen))
                 send_msg(msg);
         else fatal("%s: buffer error", __func__);
@@ -1497,7 +1469,7 @@ encode_attrib(struct sshbuf *b, const Attrib *a)
 {
 	if (!sshbuf_put_u32(b, a->flags))
                 return 0;
-        
+
         if (a->flags & SSH2_FILEXFER_ATTR_SIZE) {
                 if (!sshbuf_put_u64(b, a->size))
                         return 0;
@@ -1508,7 +1480,7 @@ encode_attrib(struct sshbuf *b, const Attrib *a)
                     !sshbuf_put_u32(b, a->gid))
                         return 0;
         }
-        
+
         if (a->flags & SSH2_FILEXFER_ATTR_PERMISSIONS) {
 		if (!sshbuf_put_u32(b, a->perm))
 			return 0;
@@ -2368,13 +2340,13 @@ process(void)
 {
 	uint buf_len = sshbuf_len(iqueue);
 	if (buf_len < 4) return;		/* Incomplete message. */
-        
+
 	const uint8_t *cp = sshbuf_ptr(iqueue);
 	uint msg_len = get_u32(cp);
 	if (msg_len > SFTP_MAX_MSG_LENGTH)
 		fatal("message too long (%dbytes, max: %d)", msg_len, SFTP_MAX_MSG_LENGTH);
 	if (buf_len < msg_len + 4) return;
-        
+
 	if (!sshbuf_consume(iqueue, 4))
 		fatal("%s: buffer error", __func__);
 	buf_len -= 4;
