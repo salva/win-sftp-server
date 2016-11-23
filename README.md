@@ -21,7 +21,7 @@ The filesystem ownership and permissions model supported by the SFTP
 protocol version 3, does not fit the one provided by Windows (for
 instance, it doesn't use integers as user -uid- an group -gid-
 identificators, neither has it the concept of user, group and other
-permissions.
+permissions).
 
 As such, file system permissions appear always as 0700 or 0600 and no
 ownership information is transmitted to the SFTP client.
