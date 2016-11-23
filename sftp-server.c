@@ -1,6 +1,8 @@
-/* $OpenBSD: sftp-server.c,v 1.110 2016/09/12 01:22:38 deraadt Exp $ */
 /*
- * Copyright (c) 2000-2004 Markus Friedl.  All rights reserved.
+ * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland.
+ * Copyright (c) 1999-2008 Markus Friedl. All rigths reserved.
+ * Copyright (c) 2001-2012 Damien Miller. All rigths reserved.
+ * Copyright (c) 2016 Qindel Formacion y Servicios SL. All rigths reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
