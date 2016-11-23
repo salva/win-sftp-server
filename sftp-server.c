@@ -2051,10 +2051,12 @@ cleanup:
 	xfree(path);
 }
 
+#define MAX_NAMES 50
+
 static void
 process_readdir(uint32_t id)
 {
-        // TODO: Fix memory leaks!
+        // TODO: Ensure we don't have memory leaks!
 
 	int hix;
         if (!get_handle(iqueue, HANDLE_DIR, &hix))
@@ -2062,110 +2064,127 @@ process_readdir(uint32_t id)
 
         wchar_t *path = handle_to_name(hix);
         HANDLE dd = handle_to_win_handle(hix);
-        Stat stats;
-        attrib_clear(&stats.attrib);
 
-        stats.name = handle_to_cached_dir_start_and_reset(hix);
-        if (!stats.name) {
-                WIN32_FIND_DATAW find_data;
-                if (!FindNextFileW(dd, &find_data))
-                        return send_ok(id, 0);
-                stats.name = xwcsdup(find_data.cFileName);
-        }
+	Stat stats[MAX_NAMES];
+	int max_len = 0; /* Approximate size of the data serialized.
+			    We keep it to ensure we don't go over the
+			    32kb limit */
 
-        // TODO: send more than one entry per packet
+	int i;
+	for (i = 0; i < MAX_NAMES && max_len < 30000; i++) {
 
-        int nlinks;
-        wchar_t *fullname = xwcscat(path, stats.name);
-        wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL, *date = NULL;
-        wchar_t mode[11 + 1];
-        StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
+		Stat *stat = stats + i;
+		attrib_clear(&stat->attrib);
 
-        HANDLE fd = CreateFileW(fullname,
-                                FILE_READ_ATTRIBUTES|READ_CONTROL,
-                                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                NULL, OPEN_EXISTING,
-                                FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
-                                NULL);
-        if (fd == INVALID_HANDLE_VALUE)
-                tell_error("CreateFile failed");
-        else {
-                BY_HANDLE_FILE_INFORMATION file_info;
-                if (GetFileInformationByHandle(fd, &file_info)) {
-                        nlinks = file_info.nNumberOfLinks;
-                        file_info_to_attrib(&file_info, &stats.attrib, fullname);
-                        posix_mode_to_wcs(stats.attrib.perm, mode);
-                        date = filetime_to_wcs(&file_info.ftLastWriteTime);
-                }
-                else tell_error("GetFileInformationByHandle failed");
+		stat->name = handle_to_cached_dir_start_and_reset(hix);
+		if (!stat->name) {
+			WIN32_FIND_DATAW find_data;
+			if (!FindNextFileW(dd, &find_data))
+				break;
+			stat->name = xwcsdup(find_data.cFileName);
+		}
 
-                SECURITY_DESCRIPTOR *sd = NULL;
-                SID *sid_owner = NULL, *sid_group = NULL;
-                if (GetSecurityInfo(fd, SE_FILE_OBJECT,
-                                    OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION,
-                                    (void **)&sid_owner, (void **)&sid_group,
-                                    NULL, NULL,
-                                    (void**)&sd) == ERROR_SUCCESS) {
+		int nlinks;
+		wchar_t *fullname = xwcscat(path, stat->name);
+		wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL, *date = NULL;
+		wchar_t mode[11 + 1];
+		StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
 
-                        SID_NAME_USE use = SidTypeUnknown;
-                        DWORD user_size = 0, group_size = 0, user_domain_size = 0, group_domain_size = 0;
-                        LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &user_domain_size, &use);
-                        if (user_size) {
-                                user_domain = xwcsalloc(user_domain_size);
-                                user = xwcsalloc(user_size);
-                                if (!LookupAccountSidW(NULL, sid_owner, user, &user_size, user_domain, &user_domain_size, &use)) {
-                                        tell_error("LookupAccountSid failed (2)");
-                                        xfree(user);
-                                        xfree(user_domain);
-                                        user = NULL;
-                                        group_domain = NULL;
-                                }
-                                else debug("user: %ls, domain: %ls", user, user_domain);
+		HANDLE fd = CreateFileW(fullname,
+					FILE_READ_ATTRIBUTES|READ_CONTROL,
+					FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+					NULL, OPEN_EXISTING,
+					FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+					NULL);
+		if (fd == INVALID_HANDLE_VALUE)
+			tell_error("CreateFile failed");
+		else {
+			BY_HANDLE_FILE_INFORMATION file_info;
+			if (GetFileInformationByHandle(fd, &file_info)) {
+				nlinks = file_info.nNumberOfLinks;
+				file_info_to_attrib(&file_info, &stat->attrib, fullname);
+				posix_mode_to_wcs(stat->attrib.perm, mode);
+				date = filetime_to_wcs(&file_info.ftLastWriteTime);
+			}
+			else tell_error("GetFileInformationByHandle failed");
 
-                        }
-                        else tell_error("LookupAccountSid failed (1)");
+			SECURITY_DESCRIPTOR *sd = NULL;
+			SID *sid_owner = NULL, *sid_group = NULL;
+			if (GetSecurityInfo(fd, SE_FILE_OBJECT,
+					    OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION,
+					    (void **)&sid_owner, (void **)&sid_group,
+					    NULL, NULL,
+					    (void**)&sd) == ERROR_SUCCESS) {
 
-                        LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &group_domain_size, &use);
-                        if (group_size) {
-                                group_domain = xwcsalloc(group_domain_size);
-                                group = xwcsalloc(group_size);
-                                if (!LookupAccountSidW(NULL, sid_group, group, &group_size, group_domain, &group_domain_size, &use)) {
-                                        tell_error("LookupAccountSid failed (4)");
-                                        xfree(group);
-                                        xfree(group_domain);
-                                        group = NULL;
-                                        group_domain = NULL;
-                                }
-                                else debug("group: %ls, domain: %ls", group, group_domain);
-                        }
-                        else tell_error("LookupAccountSid failed (1)");
+				SID_NAME_USE use = SidTypeUnknown;
+				DWORD user_size = 0, group_size = 0, user_domain_size = 0, group_domain_size = 0;
+				LookupAccountSid(NULL, sid_owner, NULL, &user_size, NULL, &user_domain_size, &use);
+				if (user_size) {
+					user_domain = xwcsalloc(user_domain_size);
+					user = xwcsalloc(user_size);
+					if (!LookupAccountSidW(NULL, sid_owner, user, &user_size, user_domain, &user_domain_size, &use)) {
+						tell_error("LookupAccountSid failed (2)");
+						xfree(user);
+						xfree(user_domain);
+						user = NULL;
+						group_domain = NULL;
+					}
+					else debug("user: %ls, domain: %ls", user, user_domain);
 
-                        LocalFree(sd);
-                }
-                else tell_error("GetSecurityInfo failed");
+				}
+				else tell_error("LookupAccountSid failed (1)");
 
-                CloseHandle(fd);
-        }
-        stats.long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
-                                  mode, nlinks,
-                                  (user ? user : L"?"),
-                                  (user_domain ? user_domain : L"?"),
-                                  (group ? group : L"?"),
-                                  (group_domain ? group_domain : L"?"),
-                                  stats.attrib.size,
-                                  date,
-                                  stats.name);
+				LookupAccountSid(NULL, sid_group, NULL, &group_size, NULL, &group_domain_size, &use);
+				if (group_size) {
+					group_domain = xwcsalloc(group_domain_size);
+					group = xwcsalloc(group_size);
+					if (!LookupAccountSidW(NULL, sid_group, group, &group_size, group_domain, &group_domain_size, &use)) {
+						tell_error("LookupAccountSid failed (4)");
+						xfree(group);
+						xfree(group_domain);
+						group = NULL;
+						group_domain = NULL;
+					}
+					else debug("group: %ls, domain: %ls", group, group_domain);
+				}
+				else tell_error("LookupAccountSid failed (1)");
 
-        send_names(id, 1, &stats);
+				LocalFree(sd);
+			}
+			else tell_error("GetSecurityInfo failed");
 
-        xfree(fullname);
-        xfree(stats.name);
-        xfree(stats.long_name);
-        if (user) xfree(user);
-        if (group) xfree(group);
-        if (user_domain) xfree(user_domain);
-        if (group_domain) xfree(group_domain);
-        if (date) xfree(date);
+			CloseHandle(fd);
+		}
+		stat->long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
+					  mode, nlinks,
+					  (user ? user : L"?"),
+					  (user_domain ? user_domain : L"?"),
+					  (group ? group : L"?"),
+					  (group_domain ? group_domain : L"?"),
+					  stat->attrib.size,
+					  date,
+					  stat->name);
+
+		if (fullname) xfree(fullname);
+		if (user) xfree(user);
+		if (group) xfree(group);
+		if (user_domain) xfree(user_domain);
+		if (group_domain) xfree(group_domain);
+		if (date) xfree(date);
+
+		max_len += (wcslen(stat->name) + wcslen(stat->name)) * 4 + 100;
+	}
+	if (i) {
+		debug("sending %d directory entries", i);
+		send_names(id, i, stats);
+		int j;
+		for (j = 0; j < i; j++) {
+			xfree(stats[j].name);
+			xfree(stats[j].long_name);
+		}
+	}
+	else
+		send_ok(id, 0);
 }
 
 static void
