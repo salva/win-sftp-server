@@ -51,8 +51,8 @@ On recent versions of Windows 10, this limitation can be overcome
 ### Symbolic links
 
 Symbolic links work as long as the underlaying file system supports
-then and the logged user has the required permissions... which is
-pretty unlikely!
+then and the logged user has the required permissions... which, in
+practice, is quite unlikely!
 
 ## Copyright and Licence
 
