@@ -15,7 +15,7 @@ pretty easy to compile it in any other environment with minor tweaks.
 
 ## Caveats
 
-* File ownership and permissions
+### File ownership and permissions
 
 The filesystem ownership and permissions model supported by the SFTP
 protocol version 3, does not fit the one provided by Windows (for
@@ -29,7 +29,7 @@ ownership information is transmitted to the SFTP client.
 Conversely, on write operations, permission and ownership information
 is not influenced by the information comming from the client.
 
-* File name encoding
+### File name encoding
 
 Automatic translation of the UTF-16
 ([WTF-16](https://simonsapin.github.io/wtf-8/#wtf-16)?) encoding used
@@ -40,7 +40,7 @@ fail to be converted to UTF-8 (moving to
 [WTF-8](https://simonsapin.github.io/wtf-8) encoding is in the TODO
 list.
 
-* Path length
+### Path length
 
 Path length is limited to the 260 characters supported by the Win32
 API.
@@ -48,7 +48,7 @@ API.
 On recent versions of Windows 10, this limitation can be overcome
 [editing some registry entries](http://www.howtogeek.com/266621/how-to-make-windows-10-accept-file-paths-over-260-characters/).
 
-* Symbolic links
+### Symbolic links
 
 Symbolic links work as long as the underlaying file system supports
 then and the logged user has the required permissions... which is
