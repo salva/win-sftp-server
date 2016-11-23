@@ -94,14 +94,6 @@
 #define SSH2_FX_OP_UNSUPPORTED		8
 #define SSH2_FX_MAX			8
 
-#define SSH_ERR_ALLOC_FAIL			-2
-#define SSH_ERR_MESSAGE_INCOMPLETE		-3
-#define SSH_ERR_INVALID_FORMAT			-4
-#define SSH_ERR_STRING_TOO_LARGE		-6
-#define SSH_ERR_NO_BUFFER_SPACE			-9
-#define SSH_ERR_BUFFER_READ_ONLY		-49
-#define SSH_ERR_BAD_PATHNAME                    -50
-
 typedef unsigned int uint;
 
 typedef struct {
