@@ -38,7 +38,7 @@ natively in Windows file systems and UTF-8 is performed on the fly.
 That means that there are some file names, valid on Windows that will
 fail to be converted to UTF-8 (moving to
 [WTF-8](https://simonsapin.github.io/wtf-8) encoding is in the TODO
-list.
+list).
 
 ### Path length
 
