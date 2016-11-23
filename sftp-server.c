@@ -2248,7 +2248,8 @@ process_rename(uint32_t id) {
 	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
                 return send_ok(id, 0);
 
-        send_ok(id, MoveFileW(oldpath, newpath));
+        send_ok(id, MoveFileExW(oldpath, newpath,
+				MOVEFILE_COPY_ALLOWED|MOVEFILE_WRITE_THROUGH));
         xfree(newpath);
 	xfree(oldpath);
 }
@@ -2258,7 +2259,7 @@ process_readlink(uint32_t id) {
 	wchar_t *path;
 	if (!sshbuf_get_path(iqueue, &path, 0))
 		return send_ok(id, 0);
-        
+
         HANDLE h = CreateFileW(path,
                                FILE_READ_ATTRIBUTES,
                                FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -2306,7 +2307,7 @@ process_extended_posix_rename(uint32_t id)
 	wchar_t *oldpath, *newpath;
 	if (!sshbuf_get_two_paths(iqueue, &oldpath, &newpath))
                 return send_ok(id, 0);
-        send_ok(id, MoveFileW(oldpath, newpath));
+        send_ok(id, MoveFileExW(oldpath, newpath, MOVEFILE_REPLACE_EXISTING));
 	xfree(oldpath);
 	xfree(newpath);
 }
