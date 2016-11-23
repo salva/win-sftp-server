@@ -58,7 +58,8 @@ ok -d $local_temp;
 ok(chdir $local_temp);
 
 
-my $s = Net::SFTP::Foreign->new(open2_cmd => \@cmd, stderr_fh => $errfh);
+my $s = Net::SFTP::Foreign->new(open2_cmd => \@cmd, stderr_fh => $errfh,
+                                );#remote_has_volumes => 1);
 diag "child pid: $s->{pid}";
 sleep $delay;
 
@@ -87,6 +88,10 @@ ok $rfh2, "open for reading with FILE_SHARE_WRITE";
 my $data = <<EOD;
   La primavera ha venido,
   nadie sabe cómo ha sido
+EOD
+
+my $hw = <<EOD;
+  hello world!
 EOD
 
 is((print {$rfh} $data), length $data, "print");
@@ -120,6 +125,16 @@ SKIP: {
     sok($s, !$s->test_e("r-$rfn"), "new file is finally gone");
 };
 
+$s->remove("c-$rfn");
+sok($s, !$s->test_e("c-$rfn"), "file c-$rfn does not exist");
+sok($s, $s->put_content($hw, "c-$rfn"), "put content");
+is($s->get_content("c-$rfn"), $hw, "get content");
+sok($s, !$s->rename($rfn, "c-$rfn"), "rename does not overwrite by default");
+is($s->get_content("c-$rfn"), $hw, "get content after failed rename");
+sok($s, $s->rename($rfn, "c-$rfn", overwrite => 1), "rename overwrite");
+is($s->get_content("c-$rfn"), $data, "get content after rename");
+sok($s, $s->rename("c-$rfn", $rfn), "rename file back");
+
 my $data1 = do { undef $/; <$rfh2> };
 is ($data1, $data, "read");
 
@@ -150,7 +165,18 @@ my $data3 = do { undef $/; <$rfh2> };
 is ($data3, $data, "reread from the beginning");
 
 SKIP: {
-    skip "symlinks are not supported by Wine" if $wine;
+    skip "symlinks are not supported by Wine"
+        if $wine;
+
+    my $slt = File::Spec->join($local_dir, "symlink-test");
+    diag "slt: $slt";
+    $s->remove("symlink-test");
+    skip "symlinks are not supported on your machine"
+        if system "mklink $slt foo >nul";
+    diag "I *can* create symlinks!";
+
+    sok($s, $s->remove("symlink-test"), "remove symlink");
+    sok($s, !$s->test_e("symlink-test"), "symlink has been removed");
 
 $s->remove("sl1-$rfn");
 sok($s, !$s->test_e("sl1-$rfn"), "symbolic link does not exist");
