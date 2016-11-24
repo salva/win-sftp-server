@@ -2510,7 +2510,7 @@ sftp_server_usage(wchar_t *binary) {
 
 int
 wmain(int argc, wchar_t **argv) {
-	char *homedir = NULL, buf[4*4096];
+	char buf[4*4096];
 	wchar_t *optarg;
 	wchar_t *binary = argv[0];
 	int ch;
@@ -2550,16 +2550,9 @@ wmain(int argc, wchar_t **argv) {
 	HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
 	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
 
-	if ((iqueue = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
-	if ((oqueue = sshbuf_new()) == NULL)
-		fatal("%s: sshbuf_new failed", __func__);
+	iqueue = sshbuf_new();
+        oqueue = sshbuf_new();
 
-	if (homedir != NULL) {
-		if (chdir(homedir) != 0) {
-			fatal("chdir to \"%s\" failed: %lu", homedir, GetLastError());
-		}
-	}
 	for (;;) {
 		DWORD olen, bytes;
 		if (sshbuf_check_reserve(oqueue, SFTP_MAX_MSG_LENGTH))
