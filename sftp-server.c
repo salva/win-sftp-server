@@ -119,6 +119,8 @@ struct sshbuf {
 };
 
 static int debug_mode = 0;
+static int list_system_files = 0;
+static int list_hidden_files = 0;
 
 /* input and output queue */
 static struct sshbuf *iqueue;
@@ -752,8 +754,7 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                         SetLastError(ERROR_BAD_PATHNAME);
                         return 0;
                 }
-
-                debug("path before cleanup: >>%s<<", p);
+		debug("path before cleanup: >>%*s<< (len: %ld)", (int)len, p, len);
 
                 /* convert '/' to '\\' and colapse multiple bars into one. */
                 int i, bars;
@@ -771,18 +772,20 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                 }
                 len = wp - p;
 
-                debug("path after cleanup: >>%s<<", p);
+                debug("path after cleanup: >>%*s<< (len: %ld)", (int)len, p, len);
 
                 int skip_vol = 0;
                 if (len >= 2 && isalpha(p[0]) && p[1] == ':') {
                         if (len == 2 || p[2] != '\\') {
 				/* TODO: use GetFullPathName() to resolve the path */
-                                debug("sshbuf_get_path (%*s) failed, relative paths after a volume name are fobidden",
-                                       len, p);
-                                SetLastError(ERROR_BAD_PATHNAME);
-                                return 0;
+				if (p[0] != rootdir[0]) {
+					debug("sshbuf_get_path (%*s) failed, relative paths after a volume name are fobidden",
+					      len, p);
+					SetLastError(ERROR_BAD_PATHNAME);
+					return 0;
+				}
                         }
-                        skip_vol = 2;
+			skip_vol = 2;
                 }
 
                 for (i = skip_vol; i < len; i++) {
@@ -800,6 +803,11 @@ sshbuf_get_path(struct sshbuf *buf, wchar_t **valp, int append_bar)
                         len--;
                 }
                 if (p[i] == '\\') append_bar = 0;
+
+		if (len == skip_vol) {
+			p = (unsigned char*)".";
+			len = 1;
+		}
         }
 
         int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -1028,7 +1036,10 @@ static int
 last_error_to_portable(void) {
 	int last_error = GetLastError();
 	int rc = win_error_to_portable(last_error);
-	debug("last error %d converted to portable %d", last_error, rc);
+	wchar_t errstr[1024];
+	FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, NULL, last_error,
+		       MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errstr, sizeof(errstr) - 1, NULL);
+	debug("last error %d converted to portable %d: %ls", last_error, rc, errstr);
 	return rc;
 }
 
@@ -1105,13 +1116,13 @@ win_attrib_to_posix_mode(DWORD attrib, const wchar_t *path) {
 			wchar_t *shortname = xwcsalloc(len1);
 			size_t len = len1 - 1;
 			if (GetShortPathNameW(path, shortname, len1) == len) {
-				debug("short name: %s, len: %ld", shortname, len);
-				if (len >= 4) {
-					wchar_t *ext = shortname + (len - 4);
-					debug("extension: %s", ext);
-					if ((_wcsicmp(ext, L".EXE") == 0) ||
-					    (_wcsicmp(ext, L".COM") == 0) ||
-					    (_wcsicmp(ext, L".BAT") == 0))
+				debug("short name: %ls, len: %ld", shortname, len);
+				if ((len >= 4) && (shortname[len - 4] == '.')) {
+					wchar_t *ext = shortname + (len - 3);
+					debug("three char extension: %ls", ext);
+					if ((_wcsicmp(ext, L"EXE") == 0) ||
+					    (_wcsicmp(ext, L"COM") == 0) ||
+					    (_wcsicmp(ext, L"BAT") == 0))
 						mode |= 0100;
 				}
 			}
@@ -2037,7 +2048,7 @@ process_readdir(uint32_t id)
 			    32kb limit */
 
 	int i;
-	for (i = 0; i < MAX_NAMES && max_len < 30000; i++) {
+	for (i = 0; i < MAX_NAMES && max_len < 30000;) {
 
 		Stat *stat = stats + i;
 		attrib_clear(&stat->attrib);
@@ -2050,12 +2061,14 @@ process_readdir(uint32_t id)
 			stat->name = xwcsdup(find_data.cFileName);
 		}
 
-		int nlinks;
+		DWORD attrs = 0x2; /* hidden by default */
+		int nlinks = 0;
 		wchar_t *fullname = xwcscat(path, stat->name);
 		wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL, *date = NULL;
 		wchar_t mode[11 + 1];
 		StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
 
+		debug ("Calling CreateFileW(%ls)", fullname);
 		HANDLE fd = CreateFileW(fullname,
 					FILE_READ_ATTRIBUTES|READ_CONTROL,
 					FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -2066,11 +2079,14 @@ process_readdir(uint32_t id)
 			tell_error("CreateFile failed");
 		else {
 			BY_HANDLE_FILE_INFORMATION file_info;
+			debug("Calling GetFileInformationByHandle(fd: %d - %ls)", fd, fullname);
 			if (GetFileInformationByHandle(fd, &file_info)) {
+				attrs = file_info.dwFileAttributes;
 				nlinks = file_info.nNumberOfLinks;
 				file_info_to_attrib(&file_info, &stat->attrib, fullname);
 				posix_mode_to_wcs(stat->attrib.perm, mode);
 				date = filetime_to_wcs(&file_info.ftLastWriteTime);
+				debug("GetFileInformationByHandle -> attrs: 0x%x", attrs);
 			}
 			else tell_error("GetFileInformationByHandle failed");
 
@@ -2121,15 +2137,25 @@ process_readdir(uint32_t id)
 
 			CloseHandle(fd);
 		}
-		stat->long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
-					  mode, nlinks,
-					  (user ? user : L"?"),
-					  (user_domain ? user_domain : L"?"),
-					  (group ? group : L"?"),
-					  (group_domain ? group_domain : L"?"),
-					  stat->attrib.size,
-					  date,
-					  stat->name);
+		if (((attrs & FILE_ATTRIBUTE_SYSTEM) && !list_system_files) ||
+		    ((attrs & FILE_ATTRIBUTE_HIDDEN) && !list_hidden_files)) {
+			debug ("Skipping hidden or system file %ls (attrs: 0x%x)", fullname, attrs);
+			xfree(stat->name);
+		}
+		else {
+			stat->long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
+						  mode, nlinks,
+						  (user ? user : L"?"),
+						  (user_domain ? user_domain : L"?"),
+						  (group ? group : L"?"),
+						  (group_domain ? group_domain : L"?"),
+						  stat->attrib.size,
+						  date,
+						  stat->name);
+
+			max_len += (wcslen(stat->name) + wcslen(stat->long_name)) * 4 + 100;
+			i++;
+		}
 
 		if (fullname) xfree(fullname);
 		if (user) xfree(user);
@@ -2137,9 +2163,8 @@ process_readdir(uint32_t id)
 		if (user_domain) xfree(user_domain);
 		if (group_domain) xfree(group_domain);
 		if (date) xfree(date);
-
-		max_len += (wcslen(stat->name) + wcslen(stat->name)) * 4 + 100;
 	}
+
 	if (i) {
 		debug("sending %d directory entries", i);
 		send_names(id, i, stats);
@@ -2380,6 +2405,8 @@ process(void)
 				/* } */
 				/* break; */
 
+				debug("Processing message of type %u with handler %s", type, handlers[i].name);
+
 				handlers[i].handler(id);
 				break;
 			}
@@ -2526,6 +2553,12 @@ wmain(int argc, wchar_t **argv) {
 			break;
 		case 'v':
 			debug_mode = 1;
+			break;
+		case 's':
+			list_system_files = 1;
+			break;
+		case 'i':
+			list_hidden_files = 1;
 			break;
 		case -1:
 			debug("bad arguments");

@@ -59,7 +59,7 @@ ok(chdir $local_temp);
 
 
 my $s = Net::SFTP::Foreign->new(open2_cmd => \@cmd, stderr_fh => $errfh,
-                                );#remote_has_volumes => 1);
+                                remote_has_volumes => 1);
 diag "child pid: $s->{pid}";
 sleep $delay;
 
