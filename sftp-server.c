@@ -264,6 +264,8 @@ strlcat(char *dst, const char *src, size_t siz)
 #define tell_error(msg) debug("%s: %lu at %s", (msg), GetLastError(), __func__)
 #define fatal_error(msg) fatal("%s: %lu at %s", (msg), GetLastError(), __func__)
 
+#define MODELEN (11 + 1)
+
 static void *
 xmalloc(size_t size)
 {
@@ -297,6 +299,13 @@ xcalloc(size_t nmemb, size_t size)
 	ptr = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, nmemb * size);
 	if (ptr == NULL)
 		fatal_error("HeapAlloc failed");
+	return ptr;
+}
+
+static void *
+xcopy(void *data, size_t size) {
+	void *ptr = xmalloc(size);
+	memcpy(ptr, data, size);
 	return ptr;
 }
 
@@ -1052,7 +1061,7 @@ struct Handle {
 	int flags;
 	wchar_t *name;
 	int next_unused;
-        wchar_t *dir_start;
+        WIN32_FIND_DATAW *find_data;
 };
 
 enum {
@@ -1141,6 +1150,9 @@ static void
 posix_mode_to_wcs(int mode, wchar_t *p) {
         int fmt = mode & FMT;
         wchar_t type;
+
+	StringCbCopyW(p, MODELEN * sizeof(wchar_t), L"---------- "); // default value
+
         switch (fmt) {
         case REG:
                 type = '-';
@@ -1182,6 +1194,13 @@ file_info_to_size(BY_HANDLE_FILE_INFORMATION *info) {
 	return ((((uint64_t)info->nFileSizeHigh) << 32) + info->nFileSizeLow);
 }
 
+static int64_t
+find_data_to_size(WIN32_FIND_DATAW *find_data) {
+	int64_t size = ((((uint64_t)find_data->nFileSizeHigh) << 32) + find_data->nFileSizeLow);
+	debug("find_data_to_size(high: %ld, low: %ld) -> size: %lld", find_data->nFileSizeHigh, find_data->nFileSizeLow, size);
+	return size;
+}
+
 static wchar_t *
 filetime_to_wcs(FILETIME *ft) {
     SYSTEMTIME st_utc, st_local, st_now_utc, st_now_local;
@@ -1201,6 +1220,18 @@ filetime_to_wcs(FILETIME *ft) {
 
     return xprintf(L"%ls %2d  %04d", month_name, st_local.wDay, st_local.wYear);
 
+}
+
+static void
+find_data_to_attrib(WIN32_FIND_DATAW *find_data, Attrib *a, const wchar_t *path) {
+	attrib_clear(a);
+        a->flags |= SSH2_FILEXFER_ATTR_SIZE;
+        a->size = find_data_to_size(find_data);
+        a->flags |= SSH2_FILEXFER_ATTR_PERMISSIONS;
+        a->perm = win_attrib_to_posix_mode(find_data->dwFileAttributes, path);
+        a->flags |= SSH2_FILEXFER_ATTR_ACMODTIME;
+	a->atime = win_time_to_posix(find_data->ftLastAccessTime);
+        a->mtime = win_time_to_posix(find_data->ftLastWriteTime);
 }
 
 static void
@@ -1260,10 +1291,11 @@ handle_unused(int i)
 	handles[i].use = 0;
 	handles[i].next_unused = first_unused_handle;
 	first_unused_handle = i;
+	debug("handle_unused(%d) done!", i);
 }
 
 static int
-handle_new(int use, const wchar_t *name, HANDLE fd, int flags, wchar_t *dir_start) {
+handle_new(int use, const wchar_t *name, HANDLE fd, int flags, WIN32_FIND_DATAW *find_data) {
 	int i;
 
 	if (first_unused_handle == -1) {
@@ -1280,13 +1312,13 @@ handle_new(int use, const wchar_t *name, HANDLE fd, int flags, wchar_t *dir_star
 	first_unused_handle = handles[i].next_unused;
 
 	debug("handle_new(use: %d, name: %ls, HANDLE: 0x%x, flags: 0x%x, %s) -> %d",
-	       use, name, fd, flags, dir_start, i);
+	      use, name, fd, flags, (find_data ? find_data->cFileName : L"NULL"), i);
 
 	handles[i].use = (use | HANDLE_USED);
 	handles[i].fd = fd;
 	handles[i].flags = flags;
 	handles[i].name = xwcsdup(name);
-        handles[i].dir_start = (dir_start ? xwcsdup(dir_start) : NULL);
+	handles[i].find_data = (find_data ? xcopy(find_data, sizeof(*find_data)) : NULL);
 	return i;
 }
 
@@ -1307,11 +1339,11 @@ handle_is_ok(int i, int type)
         return 0;
 }
 
-static wchar_t *
-handle_to_cached_dir_start_and_reset(int i) {
-        wchar_t *start = handles[i].dir_start;
-	handles[i].dir_start = NULL;
-	return start;
+static WIN32_FIND_DATAW *
+handle_to_cached_find_data_and_reset(int i) {
+        WIN32_FIND_DATAW *find_data = handles[i].find_data;
+	handles[i].find_data = NULL;
+	return find_data;
 }
 
 static void
@@ -1682,10 +1714,13 @@ process_open(uint32_t id)
 				send_handle(id, handle);
 				status = SSH2_FX_OK;
 			}
+			debug("open ok!");
 		}
 	}
-	if (status != SSH2_FX_OK)
+	if (status != SSH2_FX_OK) {
+		debug("open failed!");
 		send_status(id, status);
+	}
 	xfree(name);
 }
 
@@ -1700,8 +1735,8 @@ process_close(uint32_t id)
 
 	if (handles[hix].name)
 		xfree(handles[hix].name);
-	if (handles[hix].dir_start)
-		xfree(handles[hix].dir_start);
+	if (handles[hix].find_data)
+		xfree(handles[hix].find_data);
 
         HANDLE h = handles[hix].fd;
         if (handles[hix].use & HANDLE_FILE)
@@ -2014,7 +2049,7 @@ process_opendir(uint32_t id)
         HANDLE dd = FindFirstFileW(pattern, &find_data);
         debug("FindFistFileW(pattern=%ls) -> h:0x%x", pattern, dd);
         if (dd != INVALID_HANDLE_VALUE) {
-                int handle = handle_new(HANDLE_DIR, path, dd, 0, find_data.cFileName);
+                int handle = handle_new(HANDLE_DIR, path, dd, 0, &find_data);
                 if (handle >= 0) {
                         send_handle(id, handle);
                         goto cleanup;
@@ -2049,24 +2084,36 @@ process_readdir(uint32_t id)
 
 	int i;
 	for (i = 0; i < MAX_NAMES && max_len < 30000;) {
+		WIN32_FIND_DATAW find_data;
+		WIN32_FIND_DATAW *cached_find_data = handle_to_cached_find_data_and_reset(hix);
 
-		Stat *stat = stats + i;
-		attrib_clear(&stat->attrib);
-
-		stat->name = handle_to_cached_dir_start_and_reset(hix);
-		if (!stat->name) {
-			WIN32_FIND_DATAW find_data;
+		if (cached_find_data) {
+			debug("find_data cached from opendir");
+			memcpy(&find_data, cached_find_data, sizeof(find_data));
+			xfree(cached_find_data);
+		}
+		else {
 			if (!FindNextFileW(dd, &find_data))
 				break;
-			stat->name = xwcsdup(find_data.cFileName);
+		}
+		debug("find_data name: %ls", find_data.cFileName);
+
+		DWORD fa = find_data.dwFileAttributes;
+		if (((fa & FILE_ATTRIBUTE_SYSTEM) && !list_system_files) ||
+		    ((fa & FILE_ATTRIBUTE_HIDDEN) && !list_hidden_files)) {
+			debug ("Skipping hidden or system file %ls (attrs: 0x%x)", find_data.cFileName, fa);
 		}
 
-		DWORD attrs = 0x2; /* hidden by default */
+		wchar_t *fullname = xwcscat(path, find_data.cFileName);
+		wchar_t *date = filetime_to_wcs(&find_data.ftLastWriteTime);
+		Stat *stat = stats + i;
+		stat->name = xwcsdup(find_data.cFileName);
+		find_data_to_attrib(&find_data, &stats->attrib, fullname);
+		wchar_t mode[MODELEN];
+		posix_mode_to_wcs(stat->attrib.perm, mode);
+
 		int nlinks = 0;
-		wchar_t *fullname = xwcscat(path, stat->name);
-		wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL, *date = NULL;
-		wchar_t mode[11 + 1];
-		StringCbCopyW(mode, sizeof(mode), L"---------- "); // default value
+		wchar_t *user = NULL, *group = NULL, *user_domain = NULL, *group_domain = NULL;
 
 		debug ("Calling CreateFileW(%ls)", fullname);
 		HANDLE fd = CreateFileW(fullname,
@@ -2081,12 +2128,7 @@ process_readdir(uint32_t id)
 			BY_HANDLE_FILE_INFORMATION file_info;
 			debug("Calling GetFileInformationByHandle(fd: %d - %ls)", fd, fullname);
 			if (GetFileInformationByHandle(fd, &file_info)) {
-				attrs = file_info.dwFileAttributes;
 				nlinks = file_info.nNumberOfLinks;
-				file_info_to_attrib(&file_info, &stat->attrib, fullname);
-				posix_mode_to_wcs(stat->attrib.perm, mode);
-				date = filetime_to_wcs(&file_info.ftLastWriteTime);
-				debug("GetFileInformationByHandle -> attrs: 0x%x", attrs);
 			}
 			else tell_error("GetFileInformationByHandle failed");
 
@@ -2112,7 +2154,6 @@ process_readdir(uint32_t id)
 						group_domain = NULL;
 					}
 					else debug("user: %ls, domain: %ls", user, user_domain);
-
 				}
 				else tell_error("LookupAccountSid failed (1)");
 
@@ -2137,25 +2178,18 @@ process_readdir(uint32_t id)
 
 			CloseHandle(fd);
 		}
-		if (((attrs & FILE_ATTRIBUTE_SYSTEM) && !list_system_files) ||
-		    ((attrs & FILE_ATTRIBUTE_HIDDEN) && !list_hidden_files)) {
-			debug ("Skipping hidden or system file %ls (attrs: 0x%x)", fullname, attrs);
-			xfree(stat->name);
-		}
-		else {
-			stat->long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
-						  mode, nlinks,
-						  (user ? user : L"?"),
-						  (user_domain ? user_domain : L"?"),
-						  (group ? group : L"?"),
-						  (group_domain ? group_domain : L"?"),
-						  stat->attrib.size,
-						  date,
-						  stat->name);
 
-			max_len += (wcslen(stat->name) + wcslen(stat->long_name)) * 4 + 100;
-			i++;
-		}
+		stat->long_name = xprintf(L"%s %u %s\\%s %s\\%s %8llu %s %s",
+					  mode, nlinks,
+					  (user ? user : L"?"),
+					  (user_domain ? user_domain : L"?"),
+					  (group ? group : L"?"),
+					  (group_domain ? group_domain : L"?"),
+					  stat->attrib.size,
+					  date,
+					  stat->name);
+		max_len += (wcslen(stat->name) + wcslen(stat->long_name)) * 4 + 100;
+		i++;
 
 		if (fullname) xfree(fullname);
 		if (user) xfree(user);

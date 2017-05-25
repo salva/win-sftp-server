@@ -97,12 +97,12 @@ EOD
 is((print {$rfh} $data), length $data, "print");
 sok $s, $s->fsync($rfh), "fsync";
 
-ok(opendir my $ldh, $local_dir);
+ok((opendir my $ldh, $local_dir), "opendir");
 my @le = sort readdir $ldh;
 close $ldh;
 
 my $rdh = $s->opendir('.');
-ok defined $rdh;
+ok defined($rdh), "opendir 2";
 my @re = sort map { $_->{filename} } $s->readdir($rdh);
 
 is "@re", "@le";
