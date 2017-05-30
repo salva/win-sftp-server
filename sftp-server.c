@@ -2096,19 +2096,20 @@ process_readdir(uint32_t id)
 			if (!FindNextFileW(dd, &find_data))
 				break;
 		}
-		debug("find_data name: %ls", find_data.cFileName);
+		debug("find_data name: %ls, file attributes: 0x%x", find_data.cFileName, find_data.dwFileAttributes);
 
 		DWORD fa = find_data.dwFileAttributes;
 		if (((fa & FILE_ATTRIBUTE_SYSTEM) && !list_system_files) ||
 		    ((fa & FILE_ATTRIBUTE_HIDDEN) && !list_hidden_files)) {
 			debug ("Skipping hidden or system file %ls (attrs: 0x%x)", find_data.cFileName, fa);
+			continue;
 		}
 
 		wchar_t *fullname = xwcscat(path, find_data.cFileName);
 		wchar_t *date = filetime_to_wcs(&find_data.ftLastWriteTime);
 		Stat *stat = stats + i;
 		stat->name = xwcsdup(find_data.cFileName);
-		find_data_to_attrib(&find_data, &stats->attrib, fullname);
+		find_data_to_attrib(&find_data, &stat->attrib, fullname);
 		wchar_t mode[MODELEN];
 		posix_mode_to_wcs(stat->attrib.perm, mode);
 
