@@ -19,6 +19,7 @@
 
 #define _WIN32_WINNT   0x0600
 
+#include <winsock2.h>
 #include <windows.h>
 #include <strsafe.h>
 #include <aclapi.h>
@@ -208,6 +209,8 @@ static struct sftp_handler extended_handlers[] = {
 	{ NULL, NULL, 0, NULL, 0 }
 };
 
+static FILE *log_fh = NULL;
+
 static void fatal(const char *, ...) __attribute__((noreturn)) __attribute__((format(printf, 1, 2)));
 static void debug(const char *fmt,...);
 static void do_log(const char *fmt, va_list args);
@@ -392,13 +395,23 @@ xprintf(const wchar_t *fmt, ...) {
 }
 
 static void
+open_log(const wchar_t *name) {
+        FILE *log_fh_1 = _wfopen(name, L"a");
+        if (log_fh_1) {
+                if (log_fh) fclose(log_fh);
+                log_fh = log_fh_1;
+        }
+}
+
+static void
 do_log(const char *fmt, va_list args)
 {
 	int saved_error = GetLastError();
-	fprintf(stderr, "sftp-server: ");
-        vfprintf(stderr, fmt, args);
-	fprintf(stderr, "\r\n");
-        fflush(stderr);
+        FILE *fh = (log_fh ? log_fh : stderr);
+	fprintf(fh, "sftp-server: ");
+        vfprintf(fh, fmt, args);
+	fprintf(fh, "\r\n");
+        fflush(fh);
 	SetLastError(saved_error);
 }
 
@@ -1656,8 +1669,8 @@ process_open(uint32_t id)
         }
         else {
 		fd = CreateFileW(name, access,
-				 FILE_SHARE_DELETE|FILE_SHARE_READ|FILE_SHARE_WRITE,
-				 NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
+                                 FILE_SHARE_DELETE|FILE_SHARE_READ|FILE_SHARE_WRITE,
+                                 NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
 
                 debug("opening file %ls with access %d, error: %d", name, access, GetLastError());
 
@@ -2513,9 +2526,10 @@ wmain(int argc, wchar_t **argv) {
 	char *homedir = NULL, buf[4*4096];
 	wchar_t *optarg;
 	wchar_t *binary = argv[0];
+        wchar_t *socket_info_file = NULL;
 	int ch;
 	argc--; argv++; /* skip program name */
-	while ((ch = ParseOptW(&argc, &argv, &optarg, L"d"))) { /* old pattern: "d:f:l:P:p:Q:u:cehR" */
+	while ((ch = ParseOptW(&argc, &argv, &optarg, L"dF:L:"))) { /* old pattern: "d:f:l:P:p:Q:u:cehR" */
 		switch (ch) {
 		case 'd':
 			rootdir = realpath(optarg);
@@ -2527,6 +2541,16 @@ wmain(int argc, wchar_t **argv) {
 		case 'v':
 			debug_mode = 1;
 			break;
+                case 'F':
+                        socket_info_file = realpath(optarg);
+                        if (socket_info_file)
+                                debug("Socket file set to >>%ls<<", socket_info_file);
+                        else
+                                fatal_error("realpath failed");
+                        break;
+                case 'L':
+                        open_log(optarg);
+                        break;
 		case -1:
 			debug("bad arguments");
 		case '?':
@@ -2541,14 +2565,47 @@ wmain(int argc, wchar_t **argv) {
         debug("arguments parsed");
 
 	if (rootdir) {
-		if (!SetCurrentDirectory(rootdir))
-			fatal_error("SetCurrentDirectory failed");
+		if (!SetCurrentDirectoryW(rootdir))
+			fatal("SetCurrentDirectory failed");
 		debug("Current directory set to %ls", rootdir);
 	}
 
+        HANDLE in, out;
 
-	HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
-	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (socket_info_file) {
+                WSAPROTOCOL_INFO si;
+                char *ptr = (char*)&si;
+                HANDLE fd = CreateFileW(socket_info_file, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (fd == INVALID_HANDLE_VALUE) {
+                        fatal("Unable to open socket info file");
+                }
+                DWORD bytes, off = 0;
+                while (off < sizeof(si)) {
+                        ReadFile(fd, ptr + off, sizeof(si) - off, &bytes, NULL);
+                        if (bytes <= 0) {
+                                fatal("Unable to read socket info file");
+                        }
+                        off += bytes;
+                }
+
+                WORD wVersionRequested;
+                WSADATA wsaData;
+                wVersionRequested = MAKEWORD(2, 0);
+                if (WSAStartup(wVersionRequested, &wsaData) != 0) {
+                        fatal("Unable to initialize Winsock DLL");
+                }
+
+                in = (HANDLE)WSASocket(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &si, 0, WSA_FLAG_OVERLAPPED);
+                if (in == (HANDLE)INVALID_SOCKET) {
+                        debug("WSAGetLastError: %d", WSAGetLastError());
+                        fatal("Unable to recreate socket from child process");
+                }
+                out = in;
+        }
+        else {
+                in = GetStdHandle(STD_INPUT_HANDLE);
+                out = GetStdHandle(STD_OUTPUT_HANDLE);
+        }
 
 	if ((iqueue = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
