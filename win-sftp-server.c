@@ -228,34 +228,6 @@ static void cleanup_exit(int) __attribute__((noreturn));
 
 //#define SIZE_MAX ((unsigned long)-1)
 
-static size_t
-strlcat(char *dst, const char *src, size_t siz)
-{
-	char *d = dst;
-	const char *s = src;
-	size_t n = siz;
-	size_t dlen;
-
-	/* Find the end of dst and adjust bytes left but don't go past end */
-	while (n-- != 0 && *d != '\0')
-		d++;
-	dlen = d - dst;
-	n = siz - dlen;
-
-	if (n == 0)
-		return(dlen + strlen(s));
-	while (*s != '\0') {
-		if (n != 1) {
-			*d++ = *s;
-			n--;
-		}
-		s++;
-	}
-	*d = '\0';
-
-	return(dlen + (s - src));	/* count does not include NUL */
-}
-
 #define S_ISUID 2048
 #define S_ISGID 1024
 #define S_ISVTX 512
@@ -332,18 +304,6 @@ xwcsalloc(size_t nmemb) {
         return xmallocarray(nmemb, sizeof(wchar_t));
 }
 
-static char *
-xstrdup(const char *str)
-{
-	size_t len;
-	char *cp;
-	if (str == NULL)
-		fatal("xstrdup: NULL pointer");
-	len = strlen(str) + 1;
-	cp = xmalloc(len);
-	memcpy(cp, str, len);
-	return cp;
-}
 
 static wchar_t *
 xwcsdup(const wchar_t *wstr)
@@ -2490,64 +2450,6 @@ cleanup_exit(int i)
 	/* FIXME: add local user name and IP */
 	debug("session closed");
 	_Exit(i);
-}
-
-static char *
-percent_expand(const char *string, ...)
-{
-#define EXPAND_MAX_KEYS	16
-	uint num_keys, i, j;
-	struct {
-		const char *key;
-		const char *repl;
-	} keys[EXPAND_MAX_KEYS];
-	char buf[4096];
-	va_list ap;
-
-	/* Gather keys */
-	va_start(ap, string);
-	for (num_keys = 0; num_keys < EXPAND_MAX_KEYS; num_keys++) {
-		keys[num_keys].key = va_arg(ap, char *);
-		if (keys[num_keys].key == NULL)
-			break;
-		keys[num_keys].repl = va_arg(ap, char *);
-		if (keys[num_keys].repl == NULL)
-			fatal("%s: NULL replacement", __func__);
-	}
-	if (num_keys == EXPAND_MAX_KEYS && va_arg(ap, char *) != NULL)
-		fatal("%s: too many keys", __func__);
-	va_end(ap);
-
-	/* Expand string */
-	*buf = '\0';
-	for (i = 0; *string != '\0'; string++) {
-		if (*string != '%') {
- append:
-			buf[i++] = *string;
-			if (i >= sizeof(buf))
-				fatal("%s: string too long", __func__);
-			buf[i] = '\0';
-			continue;
-		}
-		string++;
-		/* %% case */
-		if (*string == '%')
-			goto append;
-		if (*string == '\0')
-			fatal("%s: invalid format", __func__);
-		for (j = 0; j < num_keys; j++) {
-			if (strchr(keys[j].key, *string) != NULL) {
-				i = strlcat(buf, keys[j].repl, sizeof(buf));
-				if (i >= sizeof(buf))
-					fatal("%s: string too long", __func__);
-				break;
-			}
-		}
-		if (j >= num_keys)
-			fatal("%s: unknown key %%%c", __func__, *string);
-	}
-	return (xstrdup(buf));
-#undef EXPAND_MAX_KEYS
 }
 
 static int
