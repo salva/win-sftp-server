@@ -2567,7 +2567,7 @@ wmain(int argc, wchar_t **argv) {
 		debug("Current directory set to %ls", rootdir);
 	}
 
-        HANDLE in, out;
+	SOCKET sock;
 
         if (socket_info_file) {
                 WSAPROTOCOL_INFO si;
@@ -2592,16 +2592,24 @@ wmain(int argc, wchar_t **argv) {
                         fatal("Unable to initialize Winsock DLL");
                 }
 
-                in = (HANDLE)WSASocket(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &si, 0, WSA_FLAG_OVERLAPPED);
-                if (in == (HANDLE)INVALID_SOCKET) {
-                        debug("WSAGetLastError: %d", WSAGetLastError());
-                        fatal("Unable to recreate socket from child process");
+                sock = WSASocket(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &si, 0, WSA_FLAG_OVERLAPPED);
+
+                if (sock == INVALID_SOCKET) {
+                        fatal("Unable to recreate socket from child process, error %s", win_error_to_string(WSAGetLastError()));
                 }
-                out = in;
+
+                // Ensure the socket is in blocking mode
+                u_long mode = 0; // blocking
+                int ret;
+
+                if ( (ret = ioctlsocket(sock, FIONBIO, &mode)) != NO_ERROR ) {
+                        fatal("ioctlsocket failed with code %i, error %s", ret, win_error_to_string(WSAGetLastError()));
+                }
+
         }
         else {
-                in = GetStdHandle(STD_INPUT_HANDLE);
-                out = GetStdHandle(STD_OUTPUT_HANDLE);
+		fprintf(stderr, "You must pass a socket with -F\n");
+		fatal("You must pass a socket with -F");
         }
 
 	iqueue = sshbuf_new();
@@ -2614,19 +2622,35 @@ wmain(int argc, wchar_t **argv) {
 
 		olen = sshbuf_len(oqueue);
 		if (olen > 0) {
-			if (WriteFile(out, sshbuf_ptr(oqueue), olen, &bytes, NULL)) {
+			//if (WriteFile(out, sshbuf_ptr(oqueue), olen, &bytes, NULL)) {
+			WSABUF send_buf;
+			send_buf.len = olen;
+			send_buf.buf = (char*)sshbuf_ptr(oqueue); // returns a const char*
+			DWORD flags = 0;
+			int send_err = 0;
+
+
+			if ( (send_err = WSASend(sock, &send_buf, 1, &bytes, flags, NULL, NULL)) == 0 ) {
 				if (!sshbuf_consume(oqueue, bytes))
 					fatal("%s: buffer error", __func__);
 				continue;
 			}
 			else
-				fatal("%s: WriteFile failed: %lu", __func__, GetLastError());
+			{
+				fatal("%s: WSASend failed with code %i. Error %s", __func__, send_err, win_error_to_string(WSAGetLastError()));
+			}
 		}
 
 		if (!sshbuf_check_reserve(iqueue, sizeof(buf)))
-                        fatal("%s: sshbuf_check_reserve failed", __func__);
+			fatal("%s: sshbuf_check_reserve failed", __func__);
 
-		if (ReadFile(in, buf, sizeof(buf), &bytes, NULL)) {
+		WSABUF recv_buf;
+		recv_buf.len = 16384;
+		recv_buf.buf = buf;
+		DWORD flags = 0;
+		int recv_error = 0;
+
+		if ( (recv_error = WSARecv(sock, &recv_buf, 1, &bytes,  &flags, NULL, NULL  )) == 0) {
 			if (bytes > 0) {
 				if (!sshbuf_put(iqueue, buf, bytes))
 					fatal("%s: buffer error", __func__);
@@ -2637,6 +2661,13 @@ wmain(int argc, wchar_t **argv) {
 			}
 		}
 		else
-			fatal("%s: ReadFile failed: %lu", __func__, GetLastError());
+		{
+			if ( recv_error != WSAEWOULDBLOCK ) {
+				fatal("%s: WSARecv failed with code %i: Error %s", __func__, recv_error, win_error_to_string(WSAGetLastError()));
+			} else {
+				// Shouldn't happen on a blocking socket
+				debug("read would block");
+			}
+		}
 	}
 }
