@@ -1023,33 +1023,42 @@ win_error_to_portable(int win_error) {
 	}
 }
 
+// FormatMessage produces output with newlines at the end.
+// This makes the log output ugly, so clean that up.
+static void
+remove_newlines(char *s) {
+	int i;
+
+	for (i=strlen(s)-1;i>0;i--) {
+		if (s[i] == '\r' || s[i] == '\n') {
+			s[i] = 0;
+		}
+	}
+}
+
 static int
 last_error_to_portable(void) {
 	int last_error = GetLastError();
 	int rc = win_error_to_portable(last_error);
-	wchar_t errstr[1024];
-	FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, NULL, last_error,
+	char errstr[1024];
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, last_error,
 		       MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errstr, sizeof(errstr) - 1, NULL);
-	debug("last error %d converted to portable %d: %ls", last_error, rc, errstr);
+	remove_newlines(errstr);
+	debug("last error %d converted to portable %d: %s", last_error, rc, errstr);
 	return rc;
 }
 
 static char*
 win_error_to_string(int error) {
 	static char buf[4096];
-	char last_error_string[4096];
+	char errstr[4096];
 
 	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error,
-	               MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), last_error_string, sizeof(last_error_string)-1, NULL);
+	               MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errstr, sizeof(errstr)-1, NULL);
 
-	// FormatMessage can return newlines, and that's annoying for log messages. Get rid of them.
-	for(int i=0;i<strlen(last_error_string);i++) {
-		if ( last_error_string[i] == '\r' || last_error_string[i] == '\n' ) {
-			last_error_string[i] = ' ';
-		}
-	}
+	remove_newlines(errstr);
 
-	snprintf(buf, sizeof(buf), "%d (%s)", error, last_error_string);
+	snprintf(buf, sizeof(buf), "%d (%s)", error, errstr);
 	return buf;
 }
 
