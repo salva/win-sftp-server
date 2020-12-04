@@ -295,7 +295,7 @@ xmallocarray(size_t nmemb, size_t size)
 	    nmemb == 0 || SIZE_MAX / nmemb > size)
 		return xmalloc(size * nmemb);
 
-	fatal("xmallocarray: arguments out of limits, %u elements of %u bytes",
+	fatal("xmallocarray: arguments out of limits, %" PRIu64 " elements of %" PRIu64 " bytes",
 	      nmemb, size);
 }
 
@@ -333,7 +333,7 @@ xreallocarray(void *ptr, size_t nmemb, size_t size)
 	    nmemb == 0 || SIZE_MAX / nmemb > size)
 		return xrealloc(ptr, size * nmemb);
 
-	fatal("xreallocarray: arguments out of limits, %u elements of %u bytes",
+	fatal("xreallocarray: arguments out of limits, %" PRIu64 " elements of %" PRIu64 " bytes",
 	      nmemb, size);
 }
 
@@ -664,7 +664,7 @@ sshbuf_peek_string_direct(const struct sshbuf *buf, const uint8_t **valp,
 static int
 sshbuf_get_string_direct(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
 {
-	uint32_t len;
+	size_t len;
 	const uint8_t *p;
 	if (sshbuf_peek_string_direct(buf, &p, &len)) {
                 if (sshbuf_consume(buf, len + 4)) {
