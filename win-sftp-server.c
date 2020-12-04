@@ -2519,7 +2519,18 @@ ParseOptW(int *argc, wchar_t ***argv, wchar_t **oa, wchar_t *have_args) {
 
 static void
 sftp_server_usage(wchar_t *binary) {
-	fprintf(stderr, "Usage:\n  %ls [/v] [/d start_directory]\n", binary);
+	fprintf(stderr, "Usage:\n  %ls [options] -F socketfile\n", binary);
+	fprintf(stderr, "Options:\n");
+	fprintf(stderr, "\t-d dir      Directory to share\n");
+	fprintf(stderr, "\t-h          Show this help\n");
+	fprintf(stderr, "\t-i          List hidden files\n");
+	fprintf(stderr, "\t-s          List system files\n");
+	fprintf(stderr, "\t-v          Verbose logging\n");
+	fprintf(stderr, "\t-F file     Use the TCP socket stored in file\n");
+	fprintf(stderr, "\t-L file     Write log to file\n");
+	fprintf(stderr, "\t-R          Delete socket file after use\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "To make a socket file, use the WSADuplicateSocketW function\n");
 }
 
 int
