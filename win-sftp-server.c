@@ -124,6 +124,7 @@ struct sshbuf {
 static int debug_mode = 0;
 static int list_system_files = 0;
 static int list_hidden_files = 0;
+static int delete_socket_file = 0;
 
 /* input and output queue */
 static struct sshbuf *iqueue;
@@ -2545,6 +2546,9 @@ wmain(int argc, wchar_t **argv) {
                         else
                                 fatal_error("realpath failed");
                         break;
+		case 'R':
+			delete_socket_file = 1;
+			break;
                 case 'L':
                         open_log(optarg);
                         break;
@@ -2583,6 +2587,10 @@ wmain(int argc, wchar_t **argv) {
                                 fatal("Unable to read socket info file");
                         }
                         off += bytes;
+                }
+                CloseHandle(fd);
+                if (delete_socket_file) {
+                        DeleteFileW(socket_info_file);
                 }
 
                 WORD wVersionRequested;
