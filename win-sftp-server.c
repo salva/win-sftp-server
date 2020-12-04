@@ -1033,6 +1033,25 @@ last_error_to_portable(void) {
 	return rc;
 }
 
+static char*
+win_error_to_string(int error) {
+	static char buf[4096];
+	char last_error_string[4096];
+
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error,
+	               MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), last_error_string, sizeof(last_error_string)-1, NULL);
+
+	// FormatMessage can return newlines, and that's annoying for log messages. Get rid of them.
+	for(int i=0;i<strlen(last_error_string);i++) {
+		if ( last_error_string[i] == '\r' || last_error_string[i] == '\n' ) {
+			last_error_string[i] = ' ';
+		}
+	}
+
+	snprintf(buf, sizeof(buf), "%d (%s)", error, last_error_string);
+	return buf;
+}
+
 /* handle handles */
 
 typedef struct Handle Handle;
