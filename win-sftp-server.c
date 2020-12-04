@@ -33,6 +33,8 @@
 #include <wchar.h>
 #include <ntdef.h>
 #include <winbase.h>
+#include <inttypes.h>
+#include <time.h>
 
 #define	SSH2_FILEXFER_VERSION		3
 
@@ -122,6 +124,7 @@ struct sshbuf {
 static int debug_mode = 0;
 static int list_system_files = 0;
 static int list_hidden_files = 0;
+static int delete_socket_file = 0;
 
 /* input and output queue */
 static struct sshbuf *iqueue;
@@ -226,34 +229,6 @@ static void cleanup_exit(int) __attribute__((noreturn));
 
 //#define SIZE_MAX ((unsigned long)-1)
 
-static size_t
-strlcat(char *dst, const char *src, size_t siz)
-{
-	char *d = dst;
-	const char *s = src;
-	size_t n = siz;
-	size_t dlen;
-
-	/* Find the end of dst and adjust bytes left but don't go past end */
-	while (n-- != 0 && *d != '\0')
-		d++;
-	dlen = d - dst;
-	n = siz - dlen;
-
-	if (n == 0)
-		return(dlen + strlen(s));
-	while (*s != '\0') {
-		if (n != 1) {
-			*d++ = *s;
-			n--;
-		}
-		s++;
-	}
-	*d = '\0';
-
-	return(dlen + (s - src));	/* count does not include NUL */
-}
-
 #define S_ISUID 2048
 #define S_ISGID 1024
 #define S_ISVTX 512
@@ -321,7 +296,7 @@ xmallocarray(size_t nmemb, size_t size)
 	    nmemb == 0 || SIZE_MAX / nmemb > size)
 		return xmalloc(size * nmemb);
 
-	fatal("xmallocarray: arguments out of limits, %u elements of %u bytes",
+	fatal("xmallocarray: arguments out of limits, %" PRIu64 " elements of %" PRIu64 " bytes",
 	      nmemb, size);
 }
 
@@ -330,18 +305,6 @@ xwcsalloc(size_t nmemb) {
         return xmallocarray(nmemb, sizeof(wchar_t));
 }
 
-static char *
-xstrdup(const char *str)
-{
-	size_t len;
-	char *cp;
-	if (str == NULL)
-		fatal("xstrdup: NULL pointer");
-	len = strlen(str) + 1;
-	cp = xmalloc(len);
-	memcpy(cp, str, len);
-	return cp;
-}
 
 static wchar_t *
 xwcsdup(const wchar_t *wstr)
@@ -371,7 +334,7 @@ xreallocarray(void *ptr, size_t nmemb, size_t size)
 	    nmemb == 0 || SIZE_MAX / nmemb > size)
 		return xrealloc(ptr, size * nmemb);
 
-	fatal("xreallocarray: arguments out of limits, %u elements of %u bytes",
+	fatal("xreallocarray: arguments out of limits, %" PRIu64 " elements of %" PRIu64 " bytes",
 	      nmemb, size);
 }
 
@@ -419,9 +382,15 @@ do_log(const char *fmt, va_list args)
 {
 	int saved_error = GetLastError();
         FILE *fh = (log_fh ? log_fh : stderr);
+	time_t cur_time = time(NULL);
+	struct tm cur_tm = *localtime(&cur_time);
+	fprintf(fh, "[%02d/%02d/%02d %02d:%02d:%02d] ",
+	        cur_tm.tm_year + 1900, cur_tm.tm_mon + 1, cur_tm.tm_mday,
+	        cur_tm.tm_hour, cur_tm.tm_min, cur_tm.tm_sec);
+
 	fprintf(fh, "sftp-server: ");
         vfprintf(fh, fmt, args);
-	fprintf(fh, "\r\n");
+	fprintf(fh, "\n");
         fflush(fh);
 	SetLastError(saved_error);
 }
@@ -696,7 +665,7 @@ sshbuf_peek_string_direct(const struct sshbuf *buf, const uint8_t **valp,
 static int
 sshbuf_get_string_direct(struct sshbuf *buf, const uint8_t **valp, size_t *lenp)
 {
-	uint32_t len;
+	size_t len;
 	const uint8_t *p;
 	if (sshbuf_peek_string_direct(buf, &p, &len)) {
                 if (sshbuf_consume(buf, len + 4)) {
@@ -1054,15 +1023,43 @@ win_error_to_portable(int win_error) {
 	}
 }
 
+// FormatMessage produces output with newlines at the end.
+// This makes the log output ugly, so clean that up.
+static void
+remove_newlines(char *s) {
+	int i;
+
+	for (i=strlen(s)-1;i>0;i--) {
+		if (s[i] == '\r' || s[i] == '\n') {
+			s[i] = 0;
+		}
+	}
+}
+
 static int
 last_error_to_portable(void) {
 	int last_error = GetLastError();
 	int rc = win_error_to_portable(last_error);
-	wchar_t errstr[1024];
-	FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, NULL, last_error,
+	char errstr[1024];
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, last_error,
 		       MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errstr, sizeof(errstr) - 1, NULL);
-	debug("last error %d converted to portable %d: %ls", last_error, rc, errstr);
+	remove_newlines(errstr);
+	debug("last error %d converted to portable %d: %s", last_error, rc, errstr);
 	return rc;
+}
+
+static char*
+win_error_to_string(int error) {
+	static char buf[4096];
+	char errstr[4096];
+
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error,
+	               MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), errstr, sizeof(errstr)-1, NULL);
+
+	remove_newlines(errstr);
+
+	snprintf(buf, sizeof(buf), "%d (%s)", error, errstr);
+	return buf;
 }
 
 /* handle handles */
@@ -2484,64 +2481,6 @@ cleanup_exit(int i)
 	_Exit(i);
 }
 
-static char *
-percent_expand(const char *string, ...)
-{
-#define EXPAND_MAX_KEYS	16
-	uint num_keys, i, j;
-	struct {
-		const char *key;
-		const char *repl;
-	} keys[EXPAND_MAX_KEYS];
-	char buf[4096];
-	va_list ap;
-
-	/* Gather keys */
-	va_start(ap, string);
-	for (num_keys = 0; num_keys < EXPAND_MAX_KEYS; num_keys++) {
-		keys[num_keys].key = va_arg(ap, char *);
-		if (keys[num_keys].key == NULL)
-			break;
-		keys[num_keys].repl = va_arg(ap, char *);
-		if (keys[num_keys].repl == NULL)
-			fatal("%s: NULL replacement", __func__);
-	}
-	if (num_keys == EXPAND_MAX_KEYS && va_arg(ap, char *) != NULL)
-		fatal("%s: too many keys", __func__);
-	va_end(ap);
-
-	/* Expand string */
-	*buf = '\0';
-	for (i = 0; *string != '\0'; string++) {
-		if (*string != '%') {
- append:
-			buf[i++] = *string;
-			if (i >= sizeof(buf))
-				fatal("%s: string too long", __func__);
-			buf[i] = '\0';
-			continue;
-		}
-		string++;
-		/* %% case */
-		if (*string == '%')
-			goto append;
-		if (*string == '\0')
-			fatal("%s: invalid format", __func__);
-		for (j = 0; j < num_keys; j++) {
-			if (strchr(keys[j].key, *string) != NULL) {
-				i = strlcat(buf, keys[j].repl, sizeof(buf));
-				if (i >= sizeof(buf))
-					fatal("%s: string too long", __func__);
-				break;
-			}
-		}
-		if (j >= num_keys)
-			fatal("%s: unknown key %%%c", __func__, *string);
-	}
-	return (xstrdup(buf));
-#undef EXPAND_MAX_KEYS
-}
-
 static int
 ParseOptW(int *argc, wchar_t ***argv, wchar_t **oa, wchar_t *have_args) {
 	*oa = NULL;
@@ -2580,7 +2519,18 @@ ParseOptW(int *argc, wchar_t ***argv, wchar_t **oa, wchar_t *have_args) {
 
 static void
 sftp_server_usage(wchar_t *binary) {
-	fprintf(stderr, "Usage:\n  %ls [/v] [/d start_directory]\n", binary);
+	fprintf(stderr, "Usage:\n  %ls [options] -F socketfile\n", binary);
+	fprintf(stderr, "Options:\n");
+	fprintf(stderr, "\t-d dir      Directory to share\n");
+	fprintf(stderr, "\t-h          Show this help\n");
+	fprintf(stderr, "\t-i          List hidden files\n");
+	fprintf(stderr, "\t-s          List system files\n");
+	fprintf(stderr, "\t-v          Verbose logging\n");
+	fprintf(stderr, "\t-F file     Use the TCP socket stored in file\n");
+	fprintf(stderr, "\t-L file     Write log to file\n");
+	fprintf(stderr, "\t-R          Delete socket file after use\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "To make a socket file, use the WSADuplicateSocketW function\n");
 }
 
 int
@@ -2616,6 +2566,9 @@ wmain(int argc, wchar_t **argv) {
                         else
                                 fatal_error("realpath failed");
                         break;
+		case 'R':
+			delete_socket_file = 1;
+			break;
                 case 'L':
                         open_log(optarg);
                         break;
@@ -2638,7 +2591,7 @@ wmain(int argc, wchar_t **argv) {
 		debug("Current directory set to %ls", rootdir);
 	}
 
-        HANDLE in, out;
+	SOCKET sock;
 
         if (socket_info_file) {
                 WSAPROTOCOL_INFO si;
@@ -2655,6 +2608,10 @@ wmain(int argc, wchar_t **argv) {
                         }
                         off += bytes;
                 }
+                CloseHandle(fd);
+                if (delete_socket_file) {
+                        DeleteFileW(socket_info_file);
+                }
 
                 WORD wVersionRequested;
                 WSADATA wsaData;
@@ -2663,16 +2620,24 @@ wmain(int argc, wchar_t **argv) {
                         fatal("Unable to initialize Winsock DLL");
                 }
 
-                in = (HANDLE)WSASocket(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &si, 0, WSA_FLAG_OVERLAPPED);
-                if (in == (HANDLE)INVALID_SOCKET) {
-                        debug("WSAGetLastError: %d", WSAGetLastError());
-                        fatal("Unable to recreate socket from child process");
+                sock = WSASocket(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &si, 0, WSA_FLAG_OVERLAPPED);
+
+                if (sock == INVALID_SOCKET) {
+                        fatal("Unable to recreate socket from child process, error %s", win_error_to_string(WSAGetLastError()));
                 }
-                out = in;
+
+                // Ensure the socket is in blocking mode
+                u_long mode = 0; // blocking
+                int ret;
+
+                if ( (ret = ioctlsocket(sock, FIONBIO, &mode)) != NO_ERROR ) {
+                        fatal("ioctlsocket failed with code %i, error %s", ret, win_error_to_string(WSAGetLastError()));
+                }
+
         }
         else {
-                in = GetStdHandle(STD_INPUT_HANDLE);
-                out = GetStdHandle(STD_OUTPUT_HANDLE);
+		fprintf(stderr, "You must pass a socket with -F\n");
+		fatal("You must pass a socket with -F");
         }
 
 	iqueue = sshbuf_new();
@@ -2685,19 +2650,35 @@ wmain(int argc, wchar_t **argv) {
 
 		olen = sshbuf_len(oqueue);
 		if (olen > 0) {
-			if (WriteFile(out, sshbuf_ptr(oqueue), olen, &bytes, NULL)) {
+			//if (WriteFile(out, sshbuf_ptr(oqueue), olen, &bytes, NULL)) {
+			WSABUF send_buf;
+			send_buf.len = olen;
+			send_buf.buf = (char*)sshbuf_ptr(oqueue); // returns a const char*
+			DWORD flags = 0;
+			int send_err = 0;
+
+
+			if ( (send_err = WSASend(sock, &send_buf, 1, &bytes, flags, NULL, NULL)) == 0 ) {
 				if (!sshbuf_consume(oqueue, bytes))
 					fatal("%s: buffer error", __func__);
 				continue;
 			}
 			else
-				fatal("%s: WriteFile failed: %lu", __func__, GetLastError());
+			{
+				fatal("%s: WSASend failed with code %i. Error %s", __func__, send_err, win_error_to_string(WSAGetLastError()));
+			}
 		}
 
 		if (!sshbuf_check_reserve(iqueue, sizeof(buf)))
-                        fatal("%s: sshbuf_check_reserve failed", __func__);
+			fatal("%s: sshbuf_check_reserve failed", __func__);
 
-		if (ReadFile(in, buf, sizeof(buf), &bytes, NULL)) {
+		WSABUF recv_buf;
+		recv_buf.len = 16384;
+		recv_buf.buf = buf;
+		DWORD flags = 0;
+		int recv_error = 0;
+
+		if ( (recv_error = WSARecv(sock, &recv_buf, 1, &bytes,  &flags, NULL, NULL  )) == 0) {
 			if (bytes > 0) {
 				if (!sshbuf_put(iqueue, buf, bytes))
 					fatal("%s: buffer error", __func__);
@@ -2708,6 +2689,13 @@ wmain(int argc, wchar_t **argv) {
 			}
 		}
 		else
-			fatal("%s: ReadFile failed: %lu", __func__, GetLastError());
+		{
+			if ( recv_error != WSAEWOULDBLOCK ) {
+				fatal("%s: WSARecv failed with code %i: Error %s", __func__, recv_error, win_error_to_string(WSAGetLastError()));
+			} else {
+				// Shouldn't happen on a blocking socket
+				debug("read would block");
+			}
+		}
 	}
 }
