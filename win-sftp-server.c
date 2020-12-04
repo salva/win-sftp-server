@@ -33,6 +33,8 @@
 #include <wchar.h>
 #include <ntdef.h>
 #include <winbase.h>
+#include <inttypes.h>
+#include <time.h>
 
 #define	SSH2_FILEXFER_VERSION		3
 
@@ -419,9 +421,15 @@ do_log(const char *fmt, va_list args)
 {
 	int saved_error = GetLastError();
         FILE *fh = (log_fh ? log_fh : stderr);
+	time_t cur_time = time(NULL);
+	struct tm cur_tm = *localtime(&cur_time);
+	fprintf(fh, "[%02d/%02d/%02d %02d:%02d:%02d] ",
+	        cur_tm.tm_year + 1900, cur_tm.tm_mon + 1, cur_tm.tm_mday,
+	        cur_tm.tm_hour, cur_tm.tm_min, cur_tm.tm_sec);
+
 	fprintf(fh, "sftp-server: ");
         vfprintf(fh, fmt, args);
-	fprintf(fh, "\r\n");
+	fprintf(fh, "\n");
         fflush(fh);
 	SetLastError(saved_error);
 }
